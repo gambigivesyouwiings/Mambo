@@ -1,0 +1,14 @@
+torch>=2.0
+torchaudio>=2.0
+transformers>=4.36
+accelerate>=0.25
+sentencepiece
+datasets
+soundfile
+scipy
+numpy
+pyyaml
+tensorboard
+faster-whisper
+sacrebleu
+librosa

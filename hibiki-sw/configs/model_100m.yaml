@@ -1,0 +1,147 @@
+# Hibiki-Sw 100M Parameter Model Configuration
+# Bidirectional English <-> Swahili Speech Translation
+
+model:
+  # Mimi Neural Audio Codec (frozen, pretrained)
+  codec:
+    name: "kyutai/mimi"
+    sample_rate: 24000
+    frame_rate: 12.5  # Hz
+    num_codebooks: 8   # Q=8 (reduced from 16)
+    codebook_size: 2048  # NA
+    frozen: true
+
+  # Temporal Transformer (~65M params)
+  temporal:
+    d_model: 512
+    ffn_dim: 1408        # gated SiLU inner dim
+    num_layers: 12
+    num_heads: 8
+    head_dim: 64
+    max_seq_len: 250     # ~20s at 12.5Hz
+    local_attn_window: 250
+    dropout: 0.1
+    activation: "silu"   # gated SiLU
+    rope: true           # rotary position embeddings
+
+  # Depth Transformer (~30M params)
+  depth:
+    d_model: 384
+    ffn_dim: 1024        # gated SiLU inner dim
+    num_layers_per_codebook: 4
+    num_codebooks_output: 8
+    num_codebooks_input: 8    # only used during training
+    weight_sharing_start: 5   # codebooks 5-8 share weights
+    embedding_dim: 64         # low-rank embedding tables
+    dropout: 0.1
+    activation: "silu"
+
+  # Token streams
+  tokens:
+    text_vocab_size: 32000     # SentencePiece BPE
+    audio_codebook_size: 2048  # Mimi codebook entries
+    pad_token_id: 0
+    bos_token_id: 1
+    eos_token_id: 2
+    epad_token_id: 3           # end-of-padding for text stream
+    acoustic_delay: 2          # delay between semantic and acoustic tokens
+
+  # Voice transfer conditioning
+  voice_transfer:
+    num_categories: 5   # very_bad, bad, neutral, good, very_good
+    embedding_dim: 512   # same as d_model
+    cfg_drop_prob: 0.2   # classifier-free guidance dropout during training
+
+# Text tokenizer
+tokenizer:
+  type: "sentencepiece"
+  vocab_size: 32000
+  model_path: "tokenizer/sp_ensw_32k.model"
+
+# Training configurations per stage
+training:
+  stage0_vits:
+    description: "Train VITS TTS on Common Voice Swahili"
+    batch_size: 16
+    learning_rate: 2.0e-4
+    max_steps: 50000
+    warmup_steps: 1000
+
+  stage1_text:
+    description: "Text adaptation from pretrained LM"
+    pretrained_model: null  # set to HF model ID at runtime
+    batch_size: 256         # effective (via gradient accumulation)
+    local_batch_size: 16
+    gradient_accumulation: 8  # per GPU, 2 GPUs
+    seq_length: 1024
+    learning_rate: 1.0e-4
+    max_steps: 15000
+    warmup_steps: 500
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    scheduler: "cosine"
+
+  stage2_audio:
+    description: "Audio pretraining on monolingual en+sw"
+    batch_size: 64           # effective
+    local_batch_size: 16
+    gradient_accumulation: 2
+    learning_rate: 1.5e-4
+    max_steps: 80000
+    warmup_steps: 2000
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    scheduler: "cosine"
+
+  stage3_s2st:
+    description: "Speech translation training (per direction)"
+    batch_size: 32           # effective
+    local_batch_size: 8
+    gradient_accumulation: 2
+    learning_rate: 2.0e-5
+    max_steps: 40000
+    warmup_steps: 1000
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    scheduler: "cosine"
+    noise_augmentation: true
+    predict_source_stream: true  # loss on input reconstruction
+
+  stage4_finetune:
+    description: "Fine-tuning on curated aligned data (per direction)"
+    batch_size: 8
+    local_batch_size: 4
+    gradient_accumulation: 1
+    learning_rate: 1.0e-6
+    max_steps: 4000
+    warmup_steps: 200
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    scheduler: "cosine"
+    cfg_training: true
+
+  # Common settings
+  common:
+    mixed_precision: "fp16"
+    gradient_checkpointing: true
+    save_every_steps: 2000
+    log_every_steps: 100
+    num_workers: 2
+    pin_memory: true
+    seed: 42
+
+# Inference
+inference:
+  temperature: 0.8
+  top_k_audio: 250
+  top_k_text: 50
+  cfg_gamma: 3.0           # classifier-free guidance weight
+  cfg_label_good: "very_good"
+  cfg_label_bad: "very_bad"
+
+# Evaluation
+evaluation:
+  whisper_model: "medium"  # for ASR-BLEU
+  speaker_model: "microsoft/wavlm-large"  # for speaker similarity
+  datasets:
+    - "google/fleurs"      # en_us and sw_ke splits
