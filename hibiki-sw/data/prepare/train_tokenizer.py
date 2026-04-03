@@ -33,7 +33,7 @@ def download_text_data(output_file: str, num_sentences: int = 5_000_000):
         try:
             ds = load_dataset(
                 "mozilla-foundation/common_voice_16_0",
-                lang, split="train", streaming=True, trust_remote_code=True,
+                lang, split="train", streaming=True,
             )
             count = 0
             for sample in ds:
@@ -49,7 +49,7 @@ def download_text_data(output_file: str, num_sentences: int = 5_000_000):
     try:
         ds = load_dataset(
             "opus/CCAligned", lang1="en", lang2="sw",
-            split="train", streaming=True, trust_remote_code=True,
+            split="train", streaming=True,
         )
         count = 0
         for sample in ds:
@@ -65,7 +65,7 @@ def download_text_data(output_file: str, num_sentences: int = 5_000_000):
     for lang in ["en_us", "sw_ke"]:
         print(f"  Loading FLEURS ({lang})...")
         try:
-            ds = load_dataset("google/fleurs", lang, split="train", trust_remote_code=True)
+            ds = load_dataset("google/fleurs", lang, split="train")
             for sample in ds:
                 texts.append(sample["transcription"])
         except Exception as e:

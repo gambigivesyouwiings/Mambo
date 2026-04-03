@@ -232,7 +232,6 @@ def process_common_voice(
         "mozilla-foundation/common_voice_16_0",
         lang,
         split=split,
-        trust_remote_code=True,
     )
 
     os.makedirs(output_dir, exist_ok=True)

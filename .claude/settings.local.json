@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /tmp)",
+      "Bash(python3 -c \":*)",
+      "Bash(where python:*)",
+      "Bash(where python3:*)",
+      "Bash(where py:*)",
+      "Bash(C:/Users/User/AppData/Local/Programs/Python/Python310/python.exe -c \":*)",
+      "Bash(C:/Users/User/AppData/Local/Programs/Python/Python310/python.exe -m pip install pypdf --quiet)",
+      "WebSearch",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git log:*)",
+      "Bash(git remote:*)",
+      "Bash(git push:*)",
+      "Bash(gh pr:*)",
+      "Bash(py --version)",
+      "Bash(python -c \":*)"
+    ]
+  }
+}

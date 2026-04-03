@@ -32,7 +32,7 @@ def load_text_sources(max_samples: int = 500_000) -> List[str]:
         try:
             ds = load_dataset(
                 "mozilla-foundation/common_voice_16_0",
-                lang, split="train", streaming=True, trust_remote_code=True,
+                lang, split="train", streaming=True,
             )
             count = 0
             for sample in ds:
@@ -50,7 +50,7 @@ def load_text_sources(max_samples: int = 500_000) -> List[str]:
     try:
         ds = load_dataset(
             "opus/CCAligned", lang1="en", lang2="sw",
-            split="train", streaming=True, trust_remote_code=True,
+            split="train", streaming=True,
         )
         count = 0
         for sample in ds:

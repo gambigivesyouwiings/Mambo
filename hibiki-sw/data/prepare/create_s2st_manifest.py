@@ -45,8 +45,8 @@ def create_fleurs_manifest(
     from datasets import load_dataset
 
     print("Loading FLEURS metadata...")
-    en_ds = load_dataset("google/fleurs", "en_us", split="train", trust_remote_code=True)
-    sw_ds = load_dataset("google/fleurs", "sw_ke", split="train", trust_remote_code=True)
+    en_ds = load_dataset("google/fleurs", "en_us", split="train")
+    sw_ds = load_dataset("google/fleurs", "sw_ke", split="train")
 
     # Build mapping: sentence_id -> index for matching
     en_by_id = {sample["id"]: i for i, sample in enumerate(en_ds)}

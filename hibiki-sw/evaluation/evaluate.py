@@ -169,8 +169,8 @@ def evaluate_on_fleurs(
     tgt_whisper_lang = "sw" if direction == "en2sw" else "en"
 
     print(f"Loading FLEURS test set ({src_lang} -> {tgt_lang})...")
-    src_ds = load_dataset("google/fleurs", src_lang, split="test", trust_remote_code=True)
-    tgt_ds = load_dataset("google/fleurs", tgt_lang, split="test", trust_remote_code=True)
+    src_ds = load_dataset("google/fleurs", src_lang, split="test")
+    tgt_ds = load_dataset("google/fleurs", tgt_lang, split="test")
 
     # Match by ID
     src_by_id = {s["id"]: s for s in src_ds}

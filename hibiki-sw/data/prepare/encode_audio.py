@@ -59,7 +59,7 @@ def encode_common_voice(
     print(f"Loading Common Voice ({lang})...")
     ds = load_dataset(
         "mozilla-foundation/common_voice_16_0",
-        lang, split="train", trust_remote_code=True,
+        lang, split="train",
     )
 
     os.makedirs(output_dir, exist_ok=True)
@@ -111,7 +111,7 @@ def encode_fleurs(
     from datasets import load_dataset
 
     print(f"Loading FLEURS ({lang}, {split})...")
-    ds = load_dataset("google/fleurs", lang, split=split, trust_remote_code=True)
+    ds = load_dataset("google/fleurs", lang, split=split)
 
     os.makedirs(output_dir, exist_ok=True)
     count = 0
