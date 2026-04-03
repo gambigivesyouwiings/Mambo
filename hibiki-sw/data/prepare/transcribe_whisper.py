@@ -220,17 +220,18 @@ def process_common_voice(
     """
     from datasets import load_dataset
 
-    # Map split names: Common Voice uses "train", "validation", "test"
-    # but also has "validated", "invalidated", "other"
-    hf_split = split
-    if split == "validated":
-        hf_split = "train"  # validated samples are in the train split
+    # Common Voice splits available on HuggingFace:
+    #   train, validation, test   — curated subsets of validated data
+    #   validated                 — ALL clips with ≥2 reviewer upvotes (~300hrs for sw)
+    #   invalidated               — clips rejected by reviewers
+    #   other                     — unreviewed clips
+    # Use "validated" to get all quality-checked data (superset of train+validation+test).
 
-    print(f"Loading Common Voice {lang} ({hf_split})...")
+    print(f"Loading Common Voice {lang} (split={split})...")
     ds = load_dataset(
         "mozilla-foundation/common_voice_16_0",
         lang,
-        split=hf_split,
+        split=split,
         trust_remote_code=True,
     )
 
