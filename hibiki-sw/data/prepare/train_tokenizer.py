@@ -20,29 +20,47 @@ import tempfile
 from pathlib import Path
 
 
-def download_text_data(output_file: str, num_sentences: int = 5_000_000):
-    """Download and combine English + Swahili text data."""
+def download_text_data(
+    output_file: str,
+    num_sentences: int = 5_000_000,
+    cv_dataset_dirs: dict = None,
+    cv_split: str = "validated",
+):
+    """Download and combine English + Swahili text data.
+
+    Args:
+        output_file: Path to write combined text file
+        num_sentences: Target number of sentences
+        cv_dataset_dirs: Dict mapping lang code to local CV directory path,
+            e.g. {"sw": "/content/cv-corpus-19.0-2024-09-13/sw",
+                   "en": "/content/cv-corpus-19.0-2024-09-13/en"}
+        cv_split: Common Voice split to use ("validated", "train", etc.)
+    """
     from datasets import load_dataset
 
-    print("Downloading text data...")
+    print("Collecting text data...")
     texts = []
 
-    # Common Voice transcripts
-    for lang in ["en", "sw"]:
-        print(f"  Loading Common Voice ({lang})...")
-        try:
-            ds = load_dataset(
-                "mozilla-foundation/common_voice_16_0",
-                lang, split="train", streaming=True,
-            )
-            count = 0
-            for sample in ds:
-                texts.append(sample["sentence"])
-                count += 1
-                if count >= num_sentences // 6:
-                    break
-        except Exception as e:
-            print(f"  Warning: Could not load Common Voice {lang}: {e}")
+    # Common Voice transcripts (from local dataset)
+    if cv_dataset_dirs:
+        from data.prepare.local_cv_loader import CommonVoiceLocal
+        for lang, dataset_dir in cv_dataset_dirs.items():
+            print(f"  Loading Common Voice ({lang}) from {dataset_dir}...")
+            try:
+                cv = CommonVoiceLocal(
+                    dataset_dir=dataset_dir, split=cv_split, load_audio=False
+                )
+                count = 0
+                for sentence in cv.text_iterator():
+                    texts.append(sentence)
+                    count += 1
+                    if count >= num_sentences // 6:
+                        break
+                print(f"    Loaded {count} sentences")
+            except Exception as e:
+                print(f"  Warning: Could not load Common Voice {lang}: {e}")
+    else:
+        print("  Skipping Common Voice (no --cv_dataset_dir provided)")
 
     # OPUS (CCAligned en-sw)
     print("  Loading OPUS CCAligned (en-sw)...")
@@ -130,14 +148,29 @@ def main():
     parser.add_argument("--num_sentences", type=int, default=5_000_000)
     parser.add_argument("--text_file", type=str, default=None,
                         help="Skip download, use existing text file")
+    parser.add_argument("--cv_dataset_dir", type=str, action="append", default=None,
+                        help="Common Voice local dir as lang:path, e.g. "
+                             "sw:/content/cv-corpus-19.0-2024-09-13/sw "
+                             "(can be specified multiple times for multiple languages)")
+    parser.add_argument("--cv_split", type=str, default="validated",
+                        help="Common Voice split to use (default: validated)")
     args = parser.parse_args()
+
+    # Parse --cv_dataset_dir entries into a dict
+    cv_dirs = None
+    if args.cv_dataset_dir:
+        cv_dirs = {}
+        for entry in args.cv_dataset_dir:
+            lang, path = entry.split(":", 1)
+            cv_dirs[lang] = path
 
     if args.text_file and os.path.exists(args.text_file):
         text_file = args.text_file
     else:
         text_file = os.path.join(args.output_dir, "training_text.txt")
         os.makedirs(args.output_dir, exist_ok=True)
-        download_text_data(text_file, args.num_sentences)
+        download_text_data(text_file, args.num_sentences,
+                           cv_dataset_dirs=cv_dirs, cv_split=args.cv_split)
 
     train_sentencepiece(text_file, args.output_dir, args.vocab_size)
 

@@ -20,30 +20,45 @@ import sentencepiece as spm
 from tqdm import tqdm
 
 
-def load_text_sources(max_samples: int = 500_000) -> List[str]:
-    """Load text data from multiple sources."""
+def load_text_sources(
+    max_samples: int = 500_000,
+    cv_dataset_dirs: dict = None,
+    cv_split: str = "validated",
+) -> List[str]:
+    """Load text data from multiple sources.
+
+    Args:
+        max_samples: Maximum total number of text samples
+        cv_dataset_dirs: Dict mapping lang code to local CV directory path,
+            e.g. {"sw": "/content/cv-corpus-19.0-2024-09-13/sw",
+                   "en": "/content/cv-corpus-19.0-2024-09-13/en"}
+        cv_split: Common Voice split to use ("validated", "train", etc.)
+    """
     from datasets import load_dataset
 
     texts = []
 
-    # Common Voice transcripts
-    for lang in ["en", "sw"]:
-        print(f"Loading Common Voice transcripts ({lang})...")
-        try:
-            ds = load_dataset(
-                "mozilla-foundation/common_voice_16_0",
-                lang, split="train", streaming=True,
-            )
-            count = 0
-            for sample in ds:
-                sent = sample["sentence"].strip()
-                if len(sent) > 10:  # skip very short sentences
-                    texts.append(sent)
-                    count += 1
-                if count >= max_samples // 4:
-                    break
-        except Exception as e:
-            print(f"  Warning: {e}")
+    # Common Voice transcripts (from local dataset)
+    if cv_dataset_dirs:
+        from data.prepare.local_cv_loader import CommonVoiceLocal
+        for lang, dataset_dir in cv_dataset_dirs.items():
+            print(f"Loading Common Voice transcripts ({lang}) from {dataset_dir}...")
+            try:
+                cv = CommonVoiceLocal(
+                    dataset_dir=dataset_dir, split=cv_split, load_audio=False
+                )
+                count = 0
+                for sentence in cv.text_iterator():
+                    if len(sentence) > 10:
+                        texts.append(sentence)
+                        count += 1
+                    if count >= max_samples // 4:
+                        break
+                print(f"  Loaded {count} sentences")
+            except Exception as e:
+                print(f"  Warning: {e}")
+    else:
+        print("Skipping Common Voice (no --cv_dataset_dir provided)")
 
     # OPUS parallel data
     print("Loading OPUS CCAligned (en-sw)...")
@@ -108,13 +123,28 @@ def main():
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--seq_length", type=int, default=1024)
     parser.add_argument("--max_samples", type=int, default=500_000)
+    parser.add_argument("--cv_dataset_dir", type=str, action="append", default=None,
+                        help="Common Voice local dir as lang:path, e.g. "
+                             "sw:/content/cv-corpus-19.0-2024-09-13/sw "
+                             "(can be specified multiple times for multiple languages)")
+    parser.add_argument("--cv_split", type=str, default="validated",
+                        help="Common Voice split to use (default: validated)")
     args = parser.parse_args()
+
+    # Parse --cv_dataset_dir entries into a dict
+    cv_dirs = None
+    if args.cv_dataset_dir:
+        cv_dirs = {}
+        for entry in args.cv_dataset_dir:
+            lang, path = entry.split(":", 1)
+            cv_dirs[lang] = path
 
     sp = spm.SentencePieceProcessor()
     sp.load(args.tokenizer_model)
     print(f"Loaded tokenizer: vocab_size={sp.get_piece_size()}")
 
-    texts = load_text_sources(args.max_samples)
+    texts = load_text_sources(args.max_samples, cv_dataset_dirs=cv_dirs,
+                              cv_split=args.cv_split)
     tokenize_and_save(texts, sp, args.output_dir, args.seq_length)
 
 

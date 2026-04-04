@@ -50,26 +50,43 @@ def encode_common_voice(
     lang: str,
     output_dir: str,
     codec,
+    dataset_dir: str = None,
+    split: str = "validated",
     max_samples: Optional[int] = None,
     max_duration_sec: float = 20.0,
 ):
-    """Encode Common Voice dataset to Mimi tokens."""
-    from datasets import load_dataset
+    """Encode Common Voice dataset to Mimi tokens.
 
-    print(f"Loading Common Voice ({lang})...")
-    ds = load_dataset(
-        "mozilla-foundation/common_voice_16_0",
-        lang, split="train",
-    )
+    Args:
+        lang: Language code (e.g., "en", "sw")
+        output_dir: Output directory for .npy token files
+        codec: MimiCodec instance
+        dataset_dir: Path to the extracted Common Voice language directory,
+            e.g. "/content/cv-corpus-19.0-2024-09-13/sw"
+        split: TSV split file ("validated", "train", "dev", "test", "other")
+        max_samples: Maximum number of samples to encode
+        max_duration_sec: Skip clips longer than this (seconds)
+    """
+    from data.prepare.local_cv_loader import CommonVoiceLocal
+
+    if dataset_dir is None:
+        raise ValueError(
+            "--dataset_dir is required. Point it to the extracted Common Voice "
+            "language directory, e.g. /content/cv-corpus-19.0-2024-09-13/sw"
+        )
+
+    print(f"Loading Common Voice ({lang}, split={split}) from {dataset_dir}...")
+    ds = CommonVoiceLocal(dataset_dir=dataset_dir, split=split, load_audio=True)
 
     os.makedirs(output_dir, exist_ok=True)
     count = 0
 
-    for i, sample in enumerate(tqdm(ds, desc=f"Encoding CV-{lang}")):
+    for i in tqdm(range(len(ds)), desc=f"Encoding CV-{lang}"):
         if max_samples and count >= max_samples:
             break
 
         try:
+            sample = ds[i]
             audio = sample["audio"]
             waveform = torch.tensor(audio["array"], dtype=torch.float32).unsqueeze(0)
             sr = audio["sampling_rate"]
@@ -207,6 +224,9 @@ def main():
     parser.add_argument("--num_codebooks", type=int, default=8)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--max_duration", type=float, default=20.0)
+    parser.add_argument("--dataset_dir", type=str, default=None,
+                        help="Path to extracted Common Voice language directory, "
+                             "e.g. /content/cv-corpus-19.0-2024-09-13/sw")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -215,6 +235,8 @@ def main():
     if args.source == "common_voice":
         encode_common_voice(
             args.lang, args.output_dir, codec,
+            dataset_dir=args.dataset_dir,
+            split=args.split,
             max_samples=args.max_samples,
             max_duration_sec=args.max_duration,
         )

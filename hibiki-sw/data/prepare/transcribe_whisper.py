@@ -201,38 +201,37 @@ def process_common_voice(
     split: str,
     output_dir: str,
     transcriber: WhisperTranscriber,
+    dataset_dir: str = None,
     max_samples: Optional[int] = None,
     min_duration: float = 1.0,
     max_duration: float = 30.0,
     resume_from: int = 0,
 ):
-    """Process Common Voice dataset through Whisper.
+    """Process a locally-downloaded Common Voice dataset through Whisper.
 
     Args:
         lang: Language code (e.g., "sw", "en")
-        split: Dataset split ("train", "validated", "test")
+        split: TSV split file ("validated", "train", "dev", "test", "other")
         output_dir: Output directory for JSON transcriptions
         transcriber: WhisperTranscriber instance
+        dataset_dir: Path to the extracted Common Voice language directory,
+            e.g. "/content/cv-corpus-19.0-2024-09-13/sw".
+            This directory should contain clips/ and <split>.tsv files.
         max_samples: Maximum number of samples to process
         min_duration: Skip clips shorter than this (seconds)
         max_duration: Skip clips longer than this (seconds)
         resume_from: Resume from this sample index
     """
-    from datasets import load_dataset
+    from data.prepare.local_cv_loader import CommonVoiceLocal
 
-    # Common Voice splits available on HuggingFace:
-    #   train, validation, test   — curated subsets of validated data
-    #   validated                 — ALL clips with ≥2 reviewer upvotes (~300hrs for sw)
-    #   invalidated               — clips rejected by reviewers
-    #   other                     — unreviewed clips
-    # Use "validated" to get all quality-checked data (superset of train+validation+test).
+    if dataset_dir is None:
+        raise ValueError(
+            "--dataset_dir is required. Point it to the extracted Common Voice "
+            "language directory, e.g. /content/cv-corpus-19.0-2024-09-13/sw"
+        )
 
-    print(f"Loading Common Voice {lang} (split={split})...")
-    ds = load_dataset(
-        "mozilla-foundation/common_voice_16_0",
-        lang,
-        split=split,
-    )
+    print(f"Loading Common Voice {lang} (split={split}) from {dataset_dir}...")
+    ds = CommonVoiceLocal(dataset_dir=dataset_dir, split=split, load_audio=True)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -250,7 +249,12 @@ def process_common_voice(
             if max_samples and processed >= max_samples:
                 break
 
-            sample = ds[i]
+            try:
+                sample = ds[i]
+            except Exception:
+                skipped += 1
+                continue
+
             audio = sample["audio"]
             sr = audio["sampling_rate"]
             audio_array = np.array(audio["array"], dtype=np.float32)
@@ -397,6 +401,9 @@ def main():
     parser.add_argument("--max_duration", type=float, default=30.0)
     parser.add_argument("--resume_from", type=int, default=0,
                         help="Resume from this sample index (for interrupted runs)")
+    parser.add_argument("--dataset_dir", type=str, default=None,
+                        help="Path to extracted Common Voice language directory, "
+                             "e.g. /content/cv-corpus-19.0-2024-09-13/sw")
     args = parser.parse_args()
 
     transcriber = WhisperTranscriber(
@@ -411,6 +418,7 @@ def main():
             split=args.split,
             output_dir=args.output_dir,
             transcriber=transcriber,
+            dataset_dir=args.dataset_dir,
             max_samples=args.max_samples,
             min_duration=args.min_duration,
             max_duration=args.max_duration,
