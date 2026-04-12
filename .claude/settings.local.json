@@ -16,7 +16,8 @@
       "Bash(git push:*)",
       "Bash(gh pr:*)",
       "Bash(py --version)",
-      "Bash(python -c \":*)"
+      "Bash(python -c \":*)",
+      "WebFetch(domain:datacollective.mozillafoundation.org)"
     ]
   }
 }

@@ -55,7 +55,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 def step_transcribe(args):
     """Step 1: Whisper transcription with word timestamps."""
-    from data.prepare.transcribe_whisper import WhisperTranscriber, process_common_voice
+    from data.prepare.transcribe_whisper import WhisperTranscriber
 
     print("=" * 60)
     print(f"STEP 1: Transcribe {args.source_lang} audio with Whisper")
@@ -71,17 +71,30 @@ def step_transcribe(args):
         compute_type="float16" if args.device == "cuda" else "int8",
     )
 
-    n = process_common_voice(
-        lang=args.source_lang,
-        split=args.cv_split,
-        output_dir=output_dir,
-        transcriber=transcriber,
-        dataset_dir=args.dataset_dir,
-        max_samples=args.max_samples,
-        min_duration=1.0,
-        max_duration=30.0,
-        resume_from=args.resume_from,
-    )
+    if args.source == "kenspeech":
+        from data.prepare.transcribe_whisper import process_kenspeech
+        n = process_kenspeech(
+            lang=args.source_lang,
+            output_dir=output_dir,
+            transcriber=transcriber,
+            max_samples=args.max_samples,
+            min_duration=1.0,
+            max_duration=30.0,
+            resume_from=args.resume_from,
+        )
+    else:
+        from data.prepare.transcribe_whisper import process_common_voice
+        n = process_common_voice(
+            lang=args.source_lang,
+            split=args.cv_split,
+            output_dir=output_dir,
+            transcriber=transcriber,
+            dataset_dir=args.dataset_dir,
+            max_samples=args.max_samples,
+            min_duration=1.0,
+            max_duration=30.0,
+            resume_from=args.resume_from,
+        )
 
     print(f"Transcribed {n} samples -> {output_dir}\n")
     return output_dir
@@ -300,7 +313,7 @@ def main():
         description="Hibiki-Sw data preparation pipeline"
     )
     parser.add_argument("--source", type=str, default="common_voice",
-                        choices=["common_voice", "directory"])
+                        choices=["common_voice", "kenspeech", "directory"])
     parser.add_argument("--source_lang", type=str, required=True,
                         help="Source language (sw or en)")
     parser.add_argument("--target_lang", type=str, required=True,

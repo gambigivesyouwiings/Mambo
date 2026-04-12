@@ -187,7 +187,7 @@ def create_directory_manifest(
 def main():
     parser = argparse.ArgumentParser(description="Create S2ST manifest")
     parser.add_argument("--source", type=str, default="fleurs",
-                        choices=["fleurs", "directory"],
+                        choices=["fleurs", "kenspeech", "directory"],
                         help="Data source type")
     parser.add_argument("--source_token_dir", type=str, required=True,
                         help="Directory with source audio .npy tokens")
@@ -213,7 +213,7 @@ def main():
             tokenizer_path=args.tokenizer_model,
             max_frames=args.max_frames,
         )
-    elif args.source == "directory":
+    elif args.source in ("kenspeech", "directory"):
         create_directory_manifest(
             source_dir=args.source_token_dir,
             target_dir=args.target_token_dir,

@@ -24,6 +24,7 @@ def load_text_sources(
     max_samples: int = 500_000,
     cv_dataset_dirs: dict = None,
     cv_split: str = "validated",
+    use_kenspeech: bool = False,
 ) -> List[str]:
     """Load text data from multiple sources.
 
@@ -33,10 +34,28 @@ def load_text_sources(
             e.g. {"sw": "/content/cv-corpus-19.0-2024-09-13/sw",
                    "en": "/content/cv-corpus-19.0-2024-09-13/en"}
         cv_split: Common Voice split to use ("validated", "train", etc.)
+        use_kenspeech: If True, load Swahili text from KenSpeech
     """
     from datasets import load_dataset
 
     texts = []
+
+    # KenSpeech Swahili transcripts
+    if use_kenspeech:
+        from data.prepare.kenspeech_loader import KenSpeechLoader
+        print("Loading KenSpeech Swahili transcripts...")
+        try:
+            ks = KenSpeechLoader(load_audio=False)
+            count = 0
+            for sentence in ks.text_iterator():
+                if len(sentence) > 10:
+                    texts.append(sentence)
+                    count += 1
+                if count >= max_samples // 4:
+                    break
+            print(f"  Loaded {count} sentences")
+        except Exception as e:
+            print(f"  Warning: Could not load KenSpeech: {e}")
 
     # Common Voice transcripts (from local dataset)
     if cv_dataset_dirs:
@@ -57,7 +76,7 @@ def load_text_sources(
                 print(f"  Loaded {count} sentences")
             except Exception as e:
                 print(f"  Warning: {e}")
-    else:
+    elif not use_kenspeech:
         print("Skipping Common Voice (no --cv_dataset_dir provided)")
 
     # OPUS parallel data
@@ -129,6 +148,8 @@ def main():
                              "(can be specified multiple times for multiple languages)")
     parser.add_argument("--cv_split", type=str, default="validated",
                         help="Common Voice split to use (default: validated)")
+    parser.add_argument("--kenspeech", action="store_true",
+                        help="Include KenSpeech Swahili transcripts")
     args = parser.parse_args()
 
     # Parse --cv_dataset_dir entries into a dict
@@ -144,7 +165,8 @@ def main():
     print(f"Loaded tokenizer: vocab_size={sp.get_piece_size()}")
 
     texts = load_text_sources(args.max_samples, cv_dataset_dirs=cv_dirs,
-                              cv_split=args.cv_split)
+                              cv_split=args.cv_split,
+                              use_kenspeech=args.kenspeech)
     tokenize_and_save(texts, sp, args.output_dir, args.seq_length)
 
 

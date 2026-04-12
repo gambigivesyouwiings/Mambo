@@ -160,6 +160,53 @@ def encode_fleurs(
     return count
 
 
+def encode_kenspeech(
+    output_dir: str,
+    codec,
+    max_samples: Optional[int] = None,
+    max_duration_sec: float = 20.0,
+    cache_dir: str = None,
+):
+    """Encode KenSpeech dataset to Mimi tokens."""
+    from data.prepare.kenspeech_loader import KenSpeechLoader
+
+    ds = KenSpeechLoader(load_audio=True, cache_dir=cache_dir)
+
+    os.makedirs(output_dir, exist_ok=True)
+    count = 0
+
+    for i in tqdm(range(len(ds)), desc="Encoding KenSpeech"):
+        if max_samples and count >= max_samples:
+            break
+
+        try:
+            sample = ds[i]
+            audio = sample["audio"]
+            waveform = torch.tensor(audio["array"], dtype=torch.float32).unsqueeze(0)
+            sr = audio["sampling_rate"]
+
+            duration = waveform.shape[1] / sr
+            if duration < 1.0 or duration > max_duration_sec:
+                continue
+
+            waveform = resample_audio(waveform, sr, 24000)
+            waveform = waveform.unsqueeze(0)
+
+            tokens = codec.encode(waveform)
+            tokens_np = tokens[0].cpu().numpy().astype(np.int16)
+
+            out_path = os.path.join(output_dir, f"sw_{i:07d}.npy")
+            np.save(out_path, tokens_np)
+            count += 1
+
+        except Exception as e:
+            print(f"  Skipping sample {i}: {e}")
+            continue
+
+    print(f"Encoded {count} samples from KenSpeech -> {output_dir}")
+    return count
+
+
 def encode_audio_dir(
     audio_dir: str,
     output_dir: str,
@@ -213,7 +260,7 @@ def encode_audio_dir(
 def main():
     parser = argparse.ArgumentParser(description="Encode audio to Mimi tokens")
     parser.add_argument("--source", type=str, required=True,
-                        choices=["common_voice", "fleurs", "directory"],
+                        choices=["common_voice", "kenspeech", "fleurs", "directory"],
                         help="Audio source to encode")
     parser.add_argument("--lang", type=str, default="en",
                         help="Language code (e.g. en, sw, en_us, sw_ke)")
@@ -237,6 +284,12 @@ def main():
             args.lang, args.output_dir, codec,
             dataset_dir=args.dataset_dir,
             split=args.split,
+            max_samples=args.max_samples,
+            max_duration_sec=args.max_duration,
+        )
+    elif args.source == "kenspeech":
+        encode_kenspeech(
+            args.output_dir, codec,
             max_samples=args.max_samples,
             max_duration_sec=args.max_duration,
         )

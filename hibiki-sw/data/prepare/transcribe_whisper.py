@@ -316,6 +316,131 @@ def process_common_voice(
     return processed
 
 
+def process_kenspeech(
+    lang: str,
+    output_dir: str,
+    transcriber: WhisperTranscriber,
+    max_samples: Optional[int] = None,
+    min_duration: float = 1.0,
+    max_duration: float = 30.0,
+    resume_from: int = 0,
+    cache_dir: str = None,
+):
+    """Process KenSpeech dataset: use existing transcripts, run Whisper for timestamps.
+
+    KenSpeech already has high-quality transcriptions. We use those as the
+    authoritative text but still run Whisper to extract word-level timestamps
+    needed for the contextual alignment and silence insertion steps.
+
+    Args:
+        lang: Language code (should be "sw" for KenSpeech)
+        output_dir: Output directory for JSON transcriptions
+        transcriber: WhisperTranscriber instance
+        max_samples: Maximum number of samples to process
+        min_duration: Skip clips shorter than this (seconds)
+        max_duration: Skip clips longer than this (seconds)
+        resume_from: Resume from this sample index
+        cache_dir: Optional HuggingFace cache directory
+    """
+    from data.prepare.kenspeech_loader import KenSpeechLoader
+
+    print(f"Loading KenSpeech dataset...")
+    ds = KenSpeechLoader(load_audio=True, cache_dir=cache_dir)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    index_path = os.path.join(output_dir, "index.jsonl")
+    index_mode = "a" if resume_from > 0 else "w"
+
+    processed = 0
+    skipped = 0
+    errors = 0
+    start_time = time.time()
+
+    with open(index_path, index_mode, encoding="utf-8") as idx_f:
+        for i in tqdm(range(resume_from, len(ds)), initial=resume_from, total=len(ds)):
+            if max_samples and processed >= max_samples:
+                break
+
+            try:
+                sample = ds[i]
+            except Exception:
+                skipped += 1
+                continue
+
+            audio = sample["audio"]
+            sr = audio["sampling_rate"]
+            audio_array = np.array(audio["array"], dtype=np.float32)
+            duration = len(audio_array) / sr
+
+            if duration < min_duration or duration > max_duration:
+                skipped += 1
+                continue
+
+            kenspeech_transcript = sample.get("sentence", "").strip()
+            if not kenspeech_transcript:
+                skipped += 1
+                continue
+
+            try:
+                # Run Whisper only for word-level timestamps
+                whisper_result = transcriber.transcribe_audio_array(
+                    audio_array, sr=sr, language=lang
+                )
+
+                # Use KenSpeech transcript as the authoritative text,
+                # but keep Whisper's word timestamps for alignment
+                result = {
+                    "text": kenspeech_transcript,
+                    "segments": whisper_result.get("segments", []),
+                    "words": whisper_result.get("words", []),
+                    "language": lang,
+                    "language_probability": whisper_result.get("language_probability", 1.0),
+                    "duration": round(duration, 3),
+                    "sample_idx": i,
+                    "original_sentence": kenspeech_transcript,
+                    "whisper_text": whisper_result.get("text", ""),
+                    "client_id": sample.get("client_id", ""),
+                    "path": sample.get("path", ""),
+                    "audio_duration": round(duration, 3),
+                }
+
+                out_path = os.path.join(output_dir, f"{lang}_{i:07d}.json")
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+
+                index_entry = {
+                    "idx": i,
+                    "file": f"{lang}_{i:07d}.json",
+                    "text": kenspeech_transcript,
+                    "original": kenspeech_transcript,
+                    "duration": result["audio_duration"],
+                    "n_words": len(result["words"]),
+                }
+                idx_f.write(json.dumps(index_entry, ensure_ascii=False) + "\n")
+
+                processed += 1
+
+                if processed % 500 == 0:
+                    elapsed = time.time() - start_time
+                    rate = processed / elapsed
+                    print(f"  Processed: {processed} | Skipped: {skipped} | "
+                          f"Errors: {errors} | Rate: {rate:.1f} samples/s | "
+                          f"Elapsed: {elapsed/60:.1f}min")
+
+            except Exception as e:
+                errors += 1
+                if errors <= 10:
+                    print(f"  Error on sample {i}: {e}")
+                continue
+
+    elapsed = time.time() - start_time
+    print(f"\nDone! Processed: {processed} | Skipped: {skipped} | "
+          f"Errors: {errors} | Time: {elapsed/60:.1f}min")
+    print(f"Output: {output_dir}")
+    return processed
+
+
 def process_audio_directory(
     audio_dir: str,
     lang: str,
@@ -380,7 +505,7 @@ def main():
         description="Transcribe audio with Whisper (word-level timestamps)"
     )
     parser.add_argument("--source", type=str, required=True,
-                        choices=["common_voice", "directory"],
+                        choices=["common_voice", "kenspeech", "directory"],
                         help="Audio source type")
     parser.add_argument("--lang", type=str, required=True,
                         help="Language code (e.g. sw, en)")
@@ -419,6 +544,16 @@ def main():
             output_dir=args.output_dir,
             transcriber=transcriber,
             dataset_dir=args.dataset_dir,
+            max_samples=args.max_samples,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+            resume_from=args.resume_from,
+        )
+    elif args.source == "kenspeech":
+        process_kenspeech(
+            lang=args.lang,
+            output_dir=args.output_dir,
+            transcriber=transcriber,
             max_samples=args.max_samples,
             min_duration=args.min_duration,
             max_duration=args.max_duration,

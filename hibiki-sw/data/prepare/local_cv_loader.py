@@ -37,6 +37,8 @@ Usage:
 
 import csv
 import os
+
+csv.field_size_limit(10_000_000)
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Union
 
