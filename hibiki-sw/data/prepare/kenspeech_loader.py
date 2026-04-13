@@ -47,6 +47,8 @@ class KenSpeechLoader:
     """
 
     SAMPLE_RATE = 16000
+    # Known size — used for len() since IterableDataset doesn't support it
+    KNOWN_SIZE = 5816
 
     def __init__(
         self,
@@ -57,31 +59,33 @@ class KenSpeechLoader:
 
         self.load_audio = load_audio
 
-        kwargs = {}
+        kwargs: dict = {"streaming": True}
         if cache_dir:
             kwargs["cache_dir"] = cache_dir
 
-        print("Loading KenSpeech from HuggingFace...")
+        print("Loading KenSpeech from HuggingFace (streaming)...")
         self.dataset = load_dataset(
             "Kencorpus/KenSpeech",
             split="train",
             **kwargs,
         )
-        print(f"KenSpeechLoader: {len(self.dataset)} entries loaded")
+        print("KenSpeechLoader: streaming ready")
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        # IterableDataset has no len(); return known size
+        return self.KNOWN_SIZE
 
     def __getitem__(self, idx: int) -> Dict:
-        """Get a single sample by index."""
-        row = self.dataset[idx]
-        return self._build_sample(row, idx)
+        """Get a single sample by index (requires iterating to idx)."""
+        for i, row in enumerate(self.dataset):
+            if i == idx:
+                return self._build_sample(row, idx)
+        raise IndexError(f"Index {idx} out of range")
 
     def __iter__(self) -> Iterator[Dict]:
         """Iterate over all samples."""
-        for i in range(len(self.dataset)):
+        for i, row in enumerate(self.dataset):
             try:
-                row = self.dataset[i]
                 yield self._build_sample(row, i)
             except Exception:
                 continue
@@ -122,12 +126,15 @@ class KenSpeechLoader:
                 yield text
 
     def get_stats(self) -> Dict:
-        """Return basic statistics about the dataset."""
-        transcripts = [row.get("transcript", "") for row in self.dataset]
-        speakers = set(row.get("speaker", "") for row in self.dataset)
+        """Return basic statistics about the dataset (single pass)."""
+        transcripts = []
+        speakers = set()
+        for row in self.dataset:
+            transcripts.append(row.get("transcript", ""))
+            speakers.add(row.get("speaker", ""))
         return {
             "split": "train",
-            "total_samples": len(self.dataset),
+            "total_samples": len(transcripts) or self.KNOWN_SIZE,
             "unique_speakers": len(speakers),
             "avg_sentence_length": (
                 np.mean([len(t) for t in transcripts]) if transcripts else 0
