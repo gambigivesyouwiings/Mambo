@@ -324,7 +324,7 @@ def process_kenspeech(
     min_duration: float = 1.0,
     max_duration: float = 30.0,
     resume_from: int = 0,
-    cache_dir: str = None,
+    local_dir: str = None,
 ):
     """Process KenSpeech dataset: use existing transcripts, run Whisper for timestamps.
 
@@ -340,12 +340,13 @@ def process_kenspeech(
         min_duration: Skip clips shorter than this (seconds)
         max_duration: Skip clips longer than this (seconds)
         resume_from: Resume from this sample index
-        cache_dir: Optional HuggingFace cache directory
+        local_dir: Path to local KenSpeech directory (e.g. /kaggle/input/kenspeech-sw).
+            If None, downloads from HuggingFace.
     """
     from data.prepare.kenspeech_loader import KenSpeechLoader
 
     print(f"Loading KenSpeech dataset...")
-    ds = KenSpeechLoader(load_audio=True, cache_dir=cache_dir)
+    ds = KenSpeechLoader(load_audio=True, local_dir=local_dir)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -529,6 +530,10 @@ def main():
     parser.add_argument("--dataset_dir", type=str, default=None,
                         help="Path to extracted Common Voice language directory, "
                              "e.g. /content/cv-corpus-19.0-2024-09-13/sw")
+    parser.add_argument("--kenspeech_dir", type=str, default=None,
+                        help="Path to local KenSpeech dataset directory "
+                             "(e.g. /kaggle/input/kenspeech-sw). "
+                             "If omitted, downloads from HuggingFace.")
     args = parser.parse_args()
 
     transcriber = WhisperTranscriber(
@@ -558,6 +563,7 @@ def main():
             min_duration=args.min_duration,
             max_duration=args.max_duration,
             resume_from=args.resume_from,
+            local_dir=args.kenspeech_dir,
         )
     elif args.source == "directory":
         if not args.audio_dir:

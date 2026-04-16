@@ -165,12 +165,12 @@ def encode_kenspeech(
     codec,
     max_samples: Optional[int] = None,
     max_duration_sec: float = 20.0,
-    cache_dir: str = None,
+    local_dir: str = None,
 ):
     """Encode KenSpeech dataset to Mimi tokens."""
     from data.prepare.kenspeech_loader import KenSpeechLoader
 
-    ds = KenSpeechLoader(load_audio=True, cache_dir=cache_dir)
+    ds = KenSpeechLoader(load_audio=True, local_dir=local_dir)
 
     os.makedirs(output_dir, exist_ok=True)
     count = 0
@@ -274,6 +274,10 @@ def main():
     parser.add_argument("--dataset_dir", type=str, default=None,
                         help="Path to extracted Common Voice language directory, "
                              "e.g. /content/cv-corpus-19.0-2024-09-13/sw")
+    parser.add_argument("--kenspeech_dir", type=str, default=None,
+                        help="Path to local KenSpeech directory "
+                             "(e.g. /kaggle/input/kenspeech-sw). "
+                             "If omitted, downloads from HuggingFace.")
     parser.add_argument("--device", type=str, default="cuda")
     args = parser.parse_args()
 
@@ -292,6 +296,7 @@ def main():
             args.output_dir, codec,
             max_samples=args.max_samples,
             max_duration_sec=args.max_duration,
+            local_dir=args.kenspeech_dir,
         )
     elif args.source == "fleurs":
         encode_fleurs(

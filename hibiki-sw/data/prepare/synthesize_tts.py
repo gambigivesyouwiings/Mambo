@@ -188,8 +188,14 @@ def synthesize_from_translations(
     )
 
     if not json_files:
-        print(f"No translation JSON files found in {translation_dir}")
+        print(f"ERROR: No translation JSON files found in {translation_dir}")
+        print(f"  Directory exists: {trans_dir.exists()}")
+        if trans_dir.exists():
+            all_files = list(trans_dir.iterdir())
+            print(f"  Directory contents ({len(all_files)} items): {[f.name for f in all_files[:10]]}")
         return 0
+
+    print(f"Found {len(json_files)} translation files in {translation_dir}")
 
     if max_samples:
         json_files = json_files[:max_samples]
@@ -238,9 +244,10 @@ def synthesize_from_translations(
         try:
             waveform, sr = tts.synthesize(translated_text)
         except Exception as e:
-            if idx % 500 == 0:
-                print(f"  Synthesis failed for {json_path.name}: {e}")
             failed += 1
+            # Always print first failure; then every 100 to avoid log spam
+            if failed == 1 or failed % 100 == 0:
+                print(f"  [Synthesis error #{failed}] {json_path.name}: {type(e).__name__}: {e}")
             continue
 
         # Validate output

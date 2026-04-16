@@ -55,26 +55,53 @@ class MADLADTranslator:
         device: str = "cuda",
         dtype: str = "float16",
         max_length: int = 256,
+        use_8bit: bool = False,
     ):
         self.model_name = model_name
         self.device = device
         self.dtype = torch.float16 if dtype == "float16" else torch.float32
         self.max_length = max_length
+        self.use_8bit = use_8bit
         self._model = None
         self._tokenizer = None
 
     def _load(self):
         if self._model is not None:
             return
+        import gc
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-        print(f"Loading {self.model_name} on {self.device}...")
+        # Clear any lingering GPU allocations (e.g. Whisper from previous steps)
+        gc.collect()
+        total_gb = 0.0
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            free_gb, total_bytes = torch.cuda.mem_get_info()
+            free_gb = free_gb / 1e9
+            total_gb = total_bytes / 1e9
+            print(f"GPU memory before load: {free_gb:.1f} GB free / {total_gb:.1f} GB total")
+
+        print(f"Loading {self.model_name} on {self.device} ({'int8' if self.use_8bit else self.dtype})...")
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self._model = AutoModelForSeq2SeqLM.from_pretrained(
-            self.model_name,
-            torch_dtype=self.dtype,
-        ).to(self.device)
+
+        if self.use_8bit:
+            # 8-bit quantization: ~6 GB → fits on T4 with room for inference
+            self._model = AutoModelForSeq2SeqLM.from_pretrained(
+                self.model_name,
+                load_in_8bit=True,
+                device_map="auto",
+            )
+        else:
+            self._model = AutoModelForSeq2SeqLM.from_pretrained(
+                self.model_name,
+                torch_dtype=self.dtype,
+            ).to(self.device)
+
         self._model.eval()
+
+        if torch.cuda.is_available():
+            free_gb = torch.cuda.mem_get_info()[0] / 1e9
+            print(f"GPU memory after load:  {free_gb:.1f} GB free / {total_gb:.1f} GB total")
         print("MADLAD-400 loaded.")
 
     def translate_batch(
@@ -307,7 +334,10 @@ def main():
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--dtype", type=str, default="float16",
                         choices=["float16", "float32"])
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--use_8bit", action="store_true",
+                        help="Load model in 8-bit (bitsandbytes) — halves VRAM, fits T4 (14.56 GB)")
+    parser.add_argument("--batch_size", type=int, default=8,
+                        help="Sentences per batch. Default 8 is safe for T4; raise to 16-32 if GPU has room.")
     parser.add_argument("--max_length", type=int, default=256,
                         help="Max token length for translation")
     parser.add_argument("--max_samples", type=int, default=None)
@@ -320,6 +350,7 @@ def main():
         device=args.device,
         dtype=args.dtype,
         max_length=args.max_length,
+        use_8bit=args.use_8bit,
     )
 
     translate_transcriptions(
