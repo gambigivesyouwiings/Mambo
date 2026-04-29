@@ -49,19 +49,27 @@ LANG_TAGS = {
 class MADLADTranslator:
     """Batch translator using MADLAD-400-3B."""
 
+    _DTYPE_MAP = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }
+
     def __init__(
         self,
         model_name: str = "google/madlad400-3b-mt",
         device: str = "cuda",
         dtype: str = "float16",
         max_length: int = 256,
-        use_8bit: bool = False,
+        device_map: str = "auto",
     ):
         self.model_name = model_name
         self.device = device
-        self.dtype = torch.float16 if dtype == "float16" else torch.float32
+        if dtype not in self._DTYPE_MAP:
+            raise ValueError(f"Unsupported dtype {dtype!r}; expected one of {list(self._DTYPE_MAP)}")
+        self.dtype = self._DTYPE_MAP[dtype]
         self.max_length = max_length
-        self.use_8bit = use_8bit
+        self.device_map = device_map
         self._model = None
         self._tokenizer = None
 
@@ -71,51 +79,49 @@ class MADLADTranslator:
         import gc
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-        # Clear any lingering GPU allocations (e.g. Whisper from previous steps)
         gc.collect()
-        total_gb = 0.0
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            free_gb, total_bytes = torch.cuda.mem_get_info()
-            free_gb = free_gb / 1e9
-            total_gb = total_bytes / 1e9
-            print(f"GPU memory before load: {free_gb:.1f} GB free / {total_gb:.1f} GB total")
+            self._log_gpu_mem("before load")
 
-        print(f"Loading {self.model_name} on {self.device} ({'int8' if self.use_8bit else self.dtype})...")
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        print(f"Loading {self.model_name} ({self.dtype}, device_map={self.device_map!r})...")
+        # use_fast=False: MADLAD's fast tokenizer splits <2xx> language tags into
+        # subword pieces (<, 2, en, >), so the model never sees the target-language
+        # instruction and hallucinates random languages. Slow tokenizer keeps them
+        # as single vocab tokens, matching the model card's recommendation.
+        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=False)
 
-        if self.use_8bit:
-            # 8-bit quantization: ~6 GB → fits on T4 with room for inference
-            self._model = AutoModelForSeq2SeqLM.from_pretrained(
-                self.model_name,
-                load_in_8bit=True,
-                device_map="auto",
-            )
-        else:
-            self._model = AutoModelForSeq2SeqLM.from_pretrained(
-                self.model_name,
-                torch_dtype=self.dtype,
-            ).to(self.device)
-
+        # No quantization: bitsandbytes int8/NF4 both produce degenerate outputs on
+        # T5/MADLAD (see kaggle_v7/v8 logs). fp16 weights (~12 GB) shard cleanly
+        # across 2× T4 via device_map="auto" — each GPU holds ~6 GB with room for
+        # activations. For single-GPU, pass device_map="cuda:0" or leave "auto".
+        self._model = AutoModelForSeq2SeqLM.from_pretrained(
+            self.model_name,
+            torch_dtype=self.dtype,
+            device_map=self.device_map,
+        )
         self._model.eval()
 
         if torch.cuda.is_available():
-            free_gb = torch.cuda.mem_get_info()[0] / 1e9
-            print(f"GPU memory after load:  {free_gb:.1f} GB free / {total_gb:.1f} GB total")
+            self._log_gpu_mem("after load ")
         print("MADLAD-400 loaded.")
+
+    @staticmethod
+    def _log_gpu_mem(label: str):
+        for i in range(torch.cuda.device_count()):
+            free, total = torch.cuda.mem_get_info(i)
+            print(f"GPU {i} {label}: {free/1e9:.1f} GB free / {total/1e9:.1f} GB total")
 
     def translate_batch(
         self,
         texts: List[str],
         target_lang: str,
-        beam_size: int = 4,
     ) -> List[str]:
         """Translate a batch of texts.
 
         Args:
             texts: List of source language texts.
             target_lang: Target language code (e.g., "en", "sw").
-            beam_size: Beam search width.
 
         Returns:
             List of translated texts.
@@ -124,7 +130,9 @@ class MADLADTranslator:
 
         tag = LANG_TAGS.get(target_lang, f"<2{target_lang}>")
 
-        # Prepend language tag to each input
+        # Prepend language tag. MADLAD model card uses greedy generation; beam
+        # search in bf16 on T5 can enter degenerate length-normalised loops that
+        # emit the same token (or wrong-language spam) until max_new_tokens.
         tagged = [f"{tag} {t}" for t in texts]
 
         inputs = self._tokenizer(
@@ -133,13 +141,12 @@ class MADLADTranslator:
             padding=True,
             truncation=True,
             max_length=self.max_length,
-        ).to(self.device)
+        ).to(self._model.device)
 
         with torch.no_grad():
             outputs = self._model.generate(
                 **inputs,
                 max_new_tokens=self.max_length,
-                num_beams=beam_size,
                 do_sample=False,
             )
 
@@ -226,7 +233,15 @@ def translate_transcriptions(
 
                 # Translate when batch is full
                 if len(batch_texts) >= batch_size:
-                    translations = translator.translate_batch(batch_texts, target_lang)
+                    try:
+                        translations = translator.translate_batch(batch_texts, target_lang)
+                    except Exception as e:
+                        errors += len(batch_texts)
+                        if errors <= 10:
+                            print(f"  Batch error: {e}")
+                        batch_files.clear()
+                        batch_texts.clear()
+                        continue
 
                     for (jp, trans_data), translation in zip(batch_files, translations):
                         result = {
@@ -315,6 +330,67 @@ def translate_transcriptions(
 
 
 # ---------------------------------------------------------------------------
+# Smoke test
+# ---------------------------------------------------------------------------
+
+SMOKE_SAMPLES = {
+    "sw": [
+        "Habari yako?",
+        "Nimefurahi kukutana nawe.",
+        "Wao walikuwa hawana hata habari walicheza pamoja.",
+        "Tafadhali nisaidie na kazi hii.",
+        "Leo ni siku nzuri ya kusoma vitabu.",
+    ],
+    "en": [
+        "Hello, how are you?",
+        "I am very happy to meet you.",
+        "Please help me with this task.",
+        "Today is a good day for reading books.",
+        "The children were playing together in the garden.",
+    ],
+}
+
+
+def run_smoke_test(translator: MADLADTranslator, source_lang: str, target_lang: str):
+    """Translate a handful of canonical sentences and print the results.
+
+    Used to confirm the model is producing coherent output (not "t t t t..." tokens)
+    before kicking off a multi-hour full run.
+    """
+    samples = SMOKE_SAMPLES.get(source_lang)
+    if samples is None:
+        raise ValueError(f"No smoke samples for source_lang={source_lang!r}. Add to SMOKE_SAMPLES.")
+
+    print(f"\n=== Smoke test: {source_lang} -> {target_lang} ({len(samples)} sentences) ===")
+
+    # Tokenization sanity check: <2xx> must be ONE token, not split into <,2,xx,>
+    translator._load()
+    tag = LANG_TAGS.get(target_lang, f"<2{target_lang}>")
+    probe = f"{tag} {samples[0]}"
+    tokens = translator._tokenizer.tokenize(probe)
+    tag_id = translator._tokenizer.convert_tokens_to_ids(tag)
+    unk_id = translator._tokenizer.unk_token_id
+    print(f"Tag sanity: tag={tag!r} -> id={tag_id} (unk={unk_id})")
+    print(f"First 8 tokens of {probe!r}: {tokens[:8]}")
+    if tag_id == unk_id or tag not in tokens:
+        print(f"ERROR: language tag {tag!r} is not a single vocab token. "
+              f"Model will hallucinate target languages. Fix the tokenizer loading.")
+        return
+
+    results = translator.translate_batch(samples, target_lang)
+    print()
+    for src, tgt in zip(samples, results):
+        print(f"  [{source_lang}] {src}")
+        print(f"  [{target_lang}] {tgt}")
+        print()
+
+    unique_tokens = {tok for tgt in results for tok in tgt.split()}
+    if len(unique_tokens) <= 3:
+        print("WARNING: output looks degenerate (<=3 unique tokens across all translations).")
+        print("This indicates the quantization/dtype path is broken. Do NOT run the full pipeline.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -322,20 +398,23 @@ def main():
     parser = argparse.ArgumentParser(
         description="Translate transcriptions using MADLAD-400-3B"
     )
-    parser.add_argument("--input_dir", type=str, required=True,
-                        help="Directory with Whisper transcription JSONs")
-    parser.add_argument("--output_dir", type=str, required=True,
-                        help="Output directory for translation JSONs")
+    parser.add_argument("--input_dir", type=str, default=None,
+                        help="Directory with Whisper transcription JSONs (not required with --smoke_test)")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Output directory for translation JSONs (not required with --smoke_test)")
     parser.add_argument("--source_lang", type=str, required=True,
                         help="Source language code (e.g. sw, en)")
     parser.add_argument("--target_lang", type=str, required=True,
                         help="Target language code (e.g. en, sw)")
     parser.add_argument("--model_name", type=str, default="google/madlad400-3b-mt")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--dtype", type=str, default="float16",
-                        choices=["float16", "float32"])
-    parser.add_argument("--use_8bit", action="store_true",
-                        help="Load model in 8-bit (bitsandbytes) — halves VRAM, fits T4 (14.56 GB)")
+    parser.add_argument("--dtype", type=str, default="bfloat16",
+                        choices=["float16", "bfloat16", "float32"],
+                        help="Inference dtype. bf16 is the T5/MADLAD native dtype and the only "
+                             "one that produces coherent output (fp16 overflows T5 attention softmax). "
+                             "On T4, bf16 compute is emulated via fp32 — ~2-3x slower than fp16 but stable.")
+    parser.add_argument("--device_map", type=str, default="auto",
+                        help='HF device_map. "auto" shards across all visible GPUs; "cuda:0" pins to GPU 0.')
     parser.add_argument("--batch_size", type=int, default=8,
                         help="Sentences per batch. Default 8 is safe for T4; raise to 16-32 if GPU has room.")
     parser.add_argument("--max_length", type=int, default=256,
@@ -343,6 +422,8 @@ def main():
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--resume_from", type=int, default=0,
                         help="Skip this many files (for resuming)")
+    parser.add_argument("--smoke_test", action="store_true",
+                        help="Translate 5 canonical sentences and print output; skip the full pipeline.")
     args = parser.parse_args()
 
     translator = MADLADTranslator(
@@ -350,8 +431,15 @@ def main():
         device=args.device,
         dtype=args.dtype,
         max_length=args.max_length,
-        use_8bit=args.use_8bit,
+        device_map=args.device_map,
     )
+
+    if args.smoke_test:
+        run_smoke_test(translator, args.source_lang, args.target_lang)
+        return
+
+    if not args.input_dir or not args.output_dir:
+        parser.error("--input_dir and --output_dir are required unless --smoke_test is set.")
 
     translate_transcriptions(
         input_dir=args.input_dir,

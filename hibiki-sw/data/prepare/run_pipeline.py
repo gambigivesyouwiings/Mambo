@@ -135,7 +135,7 @@ def step_translate(args):
 
 
 def step_align(args):
-    """Step 3: Contextual alignment using MADLAD perplexity."""
+    """Step 3: Contextual alignment using NLLB perplexity."""
     from data.contextual_align import batch_contextual_align
 
     print("=" * 60)
@@ -183,6 +183,8 @@ def step_align(args):
         try:
             alignments = batch_contextual_align(
                 pairs,
+                source_lang=args.source_lang,
+                target_lang=args.target_lang,
                 device=args.device,
                 min_lag=2.0,
             )

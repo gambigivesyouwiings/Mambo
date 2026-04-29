@@ -16,8 +16,12 @@ Usage:
 
 import argparse
 import os
+import sys
 import tempfile
 from pathlib import Path
+
+# Ensure project root is on path when running as a script.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 def download_text_data(
@@ -101,7 +105,12 @@ def download_text_data(
     for lang in ["en_us", "sw_ke"]:
         print(f"  Loading FLEURS ({lang})...")
         try:
-            ds = load_dataset("google/fleurs", lang, split="train")
+            ds = load_dataset(
+                "google/fleurs",
+                lang,
+                split="train",
+                trust_remote_code=True,
+            )
             for sample in ds:
                 texts.append(sample["transcription"])
         except Exception as e:
