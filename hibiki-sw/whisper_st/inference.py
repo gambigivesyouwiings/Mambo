@@ -134,6 +134,7 @@ def translate_one(
     # 4) Generate translation by extending from this prompt
     encoder_outputs = model.model.encoder(input_features=feats, return_dict=True)
     generated = model.generate(
+        input_features=feats,           # required by newer transformers even when encoder_outputs is provided
         encoder_outputs=encoder_outputs,
         decoder_input_ids=decoder_input_ids,
         max_new_tokens=max_new_tokens,
