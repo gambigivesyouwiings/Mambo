@@ -41,6 +41,14 @@ WARMUP=${WARMUP:-100}
 SEED=${SEED:-42}
 PRECISION=${PRECISION:-bf16}    # set to fp16 for T4 / older GPUs
 
+# Batch sizes — tune for your GPU. Defaults target A10G (24 GB) single GPU.
+# For T4 (16 GB): BS_SMALL=4 BS_MEDIUM=2
+# For A100/H100: BS_SMALL=32 BS_MEDIUM=8
+BS_SMALL=${BS_SMALL:-16}
+BS_MEDIUM=${BS_MEDIUM:-4}
+GA_SMALL=${GA_SMALL:-1}
+GA_MEDIUM=${GA_MEDIUM:-2}
+
 # DDP launcher (4-GPU L4 default; for Kaggle 2x T4 set:
 #   LAUNCH="accelerate launch --num_processes 2 --mixed_precision fp16"
 # or for single-GPU debug:
@@ -71,7 +79,7 @@ assert_dir() {
 log "=== Pre-flight ==="
 log "DATA_ROOT=$DATA_ROOT"
 log "RUN_ROOT=$RUN_ROOT"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | tee -a "$RUN_ROOT/orchestrator.log"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | tee -a "$RUN_ROOT/orchestrator.log" || log "  (nvidia-smi not in PATH — GPU check skipped)"
 
 assert_dir "$KENSPEECH_DIR"
 assert_dir "$SW2EN_TRANSLATIONS"
@@ -172,14 +180,14 @@ train_variant() {
 }
 
 log "=== Step 3: Training (variants) ==="
-train_variant "whisper_small_baseline"  "openai/whisper-small"   8 1 1e-5 ""
-train_variant "whisper_small_hint"      "openai/whisper-small"   8 1 1e-5 "--lexicon_path $LEXICON --hint_prob 0.5"
+train_variant "whisper_small_baseline"  "openai/whisper-small"   "$BS_SMALL" "$GA_SMALL" 1e-5 ""
+train_variant "whisper_small_hint"      "openai/whisper-small"   "$BS_SMALL" "$GA_SMALL" 1e-5 "--lexicon_path $LEXICON --hint_prob 0.5"
 
 if [[ "$SKIP_MEDIUM" -eq 1 ]]; then
     log "  SKIP_MEDIUM=1 -- skipping Whisper-medium variants"
 else
-    train_variant "whisper_medium_baseline" "openai/whisper-medium"  4 2 8e-6 ""
-    train_variant "whisper_medium_hint"     "openai/whisper-medium"  4 2 8e-6 "--lexicon_path $LEXICON --hint_prob 0.5"
+    train_variant "whisper_medium_baseline" "openai/whisper-medium"  "$BS_MEDIUM" "$GA_MEDIUM" 8e-6 ""
+    train_variant "whisper_medium_hint"     "openai/whisper-medium"  "$BS_MEDIUM" "$GA_MEDIUM" 8e-6 "--lexicon_path $LEXICON --hint_prob 0.5"
 fi
 
 # -----------------------------------------------------------------------------
