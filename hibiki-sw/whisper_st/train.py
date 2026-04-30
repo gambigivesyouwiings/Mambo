@@ -148,6 +148,7 @@ def main():
         bf16=use_bf16,
         fp16=use_fp16,
         gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
         eval_steps=200,
         save_strategy="steps",
         save_steps=400,
