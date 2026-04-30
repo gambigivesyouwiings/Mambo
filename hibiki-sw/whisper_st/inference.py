@@ -132,10 +132,8 @@ def translate_one(
     decoder_input_ids = torch.tensor([decoder_prompt], dtype=torch.long, device=device)
 
     # 4) Generate translation by extending from this prompt
-    encoder_outputs = model.model.encoder(input_features=feats, return_dict=True)
     generated = model.generate(
-        input_features=feats,           # required by newer transformers even when encoder_outputs is provided
-        encoder_outputs=encoder_outputs,
+        input_features=feats,
         decoder_input_ids=decoder_input_ids,
         max_new_tokens=max_new_tokens,
         num_beams=num_beams,
