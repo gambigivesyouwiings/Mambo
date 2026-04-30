@@ -81,13 +81,14 @@ class TranscriptPromptedWhisper(WhisperForConditionalGeneration):
 
     def forward(
         self,
-        input_features: torch.FloatTensor,
+        input_features: Optional[torch.FloatTensor] = None,
         decoder_input_ids: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         transcript_labels: Optional[torch.LongTensor] = None,
         transcript_label_lengths: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.LongTensor] = None,
+        encoder_outputs=None,
         return_dict: bool = True,
         **kwargs,
     ) -> Union[Tuple, TranscriptPromptedOutput]:
@@ -95,6 +96,8 @@ class TranscriptPromptedWhisper(WhisperForConditionalGeneration):
 
         Args:
             input_features: (B, n_mels, T_in) Whisper mel spectrograms.
+            encoder_outputs: pre-computed encoder outputs (used by generate() on
+                steps 2+ of beam search so the encoder isn't re-run each step).
             decoder_input_ids: (B, L) full prompt including
                 <|sot|><|sw|><|transcribe|>{transcript}<|en|><|translate|>{translation}.
             labels: (B, L) labels for CE loss; positions for non-translation
@@ -106,11 +109,12 @@ class TranscriptPromptedWhisper(WhisperForConditionalGeneration):
         Returns:
             TranscriptPromptedOutput with .loss, .ctc_loss, .ce_loss, .logits.
         """
-        # 1) Encode audio
-        encoder_outputs = self.model.encoder(
-            input_features=input_features,
-            return_dict=True,
-        )
+        # 1) Encode audio (skip if encoder_outputs already provided by generate())
+        if encoder_outputs is None:
+            encoder_outputs = self.model.encoder(
+                input_features=input_features,
+                return_dict=True,
+            )
         encoder_hidden = encoder_outputs.last_hidden_state  # (B, T_enc, D)
 
         # 2) CTC head

@@ -95,7 +95,6 @@ def translate_one(
     processor: WhisperProcessor,
     lexicon: Optional[Dict[str, str]] = None,
     max_new_tokens: int = 200,
-    num_beams: int = 4,
     device: str = "cuda",
 ) -> Dict:
     """Run the full transcript-prompted ST pipeline on a single audio array."""
@@ -129,19 +128,27 @@ def translate_one(
         + transcript_ids
         + [en, translate, notim]
     )
-    decoder_input_ids = torch.tensor([decoder_prompt], dtype=torch.long, device=device)
 
-    # 4) Generate translation by extending from this prompt
-    generated = model.generate(
-        input_features=feats,
-        decoder_input_ids=decoder_input_ids,
-        max_new_tokens=max_new_tokens,
-        num_beams=num_beams,
-        do_sample=False,
-        forced_decoder_ids=None,
-    )
-    # Strip the prompt portion
-    new_tokens = generated[0, decoder_input_ids.size(1):]
+    # 4) Generate translation with manual greedy decode (avoids transformers
+    #    generate() API churn around input_features vs encoder_outputs across versions)
+    encoder_outputs = model.model.encoder(input_features=feats, return_dict=True)
+    encoder_hidden = encoder_outputs.last_hidden_state
+
+    eot_id = tokenizer.eos_token_id
+    generated_ids = decoder_prompt[:]
+    for _ in range(max_new_tokens):
+        dec_ids = torch.tensor([generated_ids], dtype=torch.long, device=device)
+        dec_out = model.model.decoder(
+            input_ids=dec_ids,
+            encoder_hidden_states=encoder_hidden,
+            return_dict=True,
+        )
+        next_token = model.proj_out(dec_out.last_hidden_state[:, -1, :]).argmax(dim=-1).item()
+        generated_ids.append(next_token)
+        if next_token == eot_id:
+            break
+
+    new_tokens = generated_ids[len(decoder_prompt):]
     translation = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
     return {
@@ -160,7 +167,6 @@ def main():
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--lexicon_path", type=str, default=None,
                         help="Optional JSONL lexicon for prompt augmentation")
-    parser.add_argument("--num_beams", type=int, default=4)
     parser.add_argument("--max_new_tokens", type=int, default=200)
     parser.add_argument("--max_samples", type=int, default=None)
     args = parser.parse_args()
@@ -194,8 +200,7 @@ def main():
             try:
                 result = translate_one(
                     audio, model, processor, lexicon=lexicon,
-                    max_new_tokens=args.max_new_tokens,
-                    num_beams=args.num_beams, device=device,
+                    max_new_tokens=args.max_new_tokens, device=device,
                 )
             except Exception as e:
                 print(f"  Error on {wav_path.name}: {e}")
