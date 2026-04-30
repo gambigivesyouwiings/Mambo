@@ -135,8 +135,21 @@ class WhisperTranscriber:
         sr: int = 16000,
         language: str = "sw",
         beam_size: int = 5,
+        initial_prompt: str = None,
     ) -> Dict:
-        """Transcribe from a numpy audio array (for HuggingFace datasets)."""
+        """Transcribe from a numpy audio array (for HuggingFace datasets).
+
+        Args:
+            audio: 1-D float32 numpy array
+            sr: Sample rate of `audio`
+            language: Language code for Whisper
+            beam_size: Beam search width
+            initial_prompt: Optional prompt to guide Whisper's decoding.
+                When set to the known ground-truth transcript (e.g., CV `sentence`),
+                Whisper produces timestamps that closely follow the known text
+                instead of free-form transcribing — useful as a fallback when
+                WhisperX forced alignment is unavailable.
+        """
         self._load()
 
         # faster-whisper accepts numpy arrays directly
@@ -159,6 +172,7 @@ class WhisperTranscriber:
             beam_size=beam_size,
             word_timestamps=True,
             vad_filter=True,
+            initial_prompt=initial_prompt,
         )
 
         segments = []
@@ -193,6 +207,137 @@ class WhisperTranscriber:
 
 
 # ---------------------------------------------------------------------------
+# Forced alignment (WhisperX)
+# ---------------------------------------------------------------------------
+
+def _uniform_timestamps(
+    transcript: str, duration: float
+) -> List[Tuple[str, float, float]]:
+    """Fallback: distribute word timestamps uniformly across audio duration.
+
+    Used when both WhisperX and Whisper+initial_prompt fail. Timestamps are
+    inaccurate but at least non-empty, so downstream steps won't crash.
+    """
+    words = transcript.strip().split()
+    if not words:
+        return []
+    step = duration / len(words)
+    return [(w, round(i * step, 3), round((i + 1) * step, 3)) for i, w in enumerate(words)]
+
+
+class WhisperXAligner:
+    """Forced alignment using WhisperX — aligns a *known* transcript to audio.
+
+    Much more accurate than free-form Whisper for low-resource languages like
+    Swahili because it never re-transcribes — it only pins the existing text to
+    the audio timeline using a wav2vec2 phoneme model.
+
+    Fallback chain (applied automatically):
+        1. WhisperX forced alignment  (best)
+        2. Uniform timestamp spread   (last resort if whisperx unavailable)
+
+    The caller (process_common_voice) handles the Whisper+initial_prompt middle
+    tier when this object is not provided.
+    """
+
+    def __init__(self, language: str = "sw", device: str = "cuda"):
+        self.language = language
+        self.device = device
+        self._align_model = None
+        self._align_metadata = None
+        self._available = False
+        self._load()
+
+    def _load(self):
+        try:
+            import whisperx
+            print(f"Loading WhisperX alignment model for '{self.language}'...")
+            self._align_model, self._align_metadata = whisperx.load_align_model(
+                language_code=self.language,
+                device=self.device,
+            )
+            self._available = True
+            print("WhisperX alignment model loaded.")
+        except ImportError:
+            print(
+                "  whisperx not installed — forced alignment unavailable.\n"
+                "  Install with: pip install whisperx"
+            )
+        except Exception as e:
+            print(
+                f"  Could not load WhisperX alignment model for '{self.language}': {e}\n"
+                "  Falling back to Whisper+initial_prompt for timestamps."
+            )
+
+    @property
+    def available(self) -> bool:
+        return self._available
+
+    def align(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        transcript: str,
+    ) -> List[Tuple[str, float, float]]:
+        """Align a known transcript to audio at the word level.
+
+        Args:
+            audio: 1-D float32 numpy array at any sample rate
+            sr: Sample rate of `audio`
+            transcript: Ground-truth text (e.g., Common Voice `sentence`)
+
+        Returns:
+            List of (word, start_sec, end_sec) tuples, sorted by start time.
+            Falls back to uniform distribution if alignment fails.
+        """
+        if not self._available:
+            return _uniform_timestamps(transcript, len(audio) / sr)
+
+        import whisperx
+
+        # WhisperX expects 16 kHz float32
+        if sr != 16000:
+            try:
+                from scipy.signal import resample_poly
+                from math import gcd
+                g = gcd(16000, sr)
+                audio = resample_poly(audio, 16000 // g, sr // g).astype(np.float32)
+                sr = 16000
+            except Exception:
+                pass  # proceed anyway; whisperx may still work
+
+        duration = len(audio) / sr
+
+        try:
+            segments = [{"start": 0.0, "end": duration, "text": transcript}]
+            aligned = whisperx.align(
+                segments,
+                self._align_model,
+                self._align_metadata,
+                audio,
+                self.device,
+                return_char_alignments=False,
+            )
+
+            words: List[Tuple[str, float, float]] = []
+            for seg in aligned.get("segments", []):
+                for w in seg.get("words", []):
+                    word_str = w.get("word", "").strip()
+                    start = round(float(w.get("start", 0.0)), 3)
+                    end = round(float(w.get("end", 0.0)), 3)
+                    if word_str:
+                        words.append((word_str, start, end))
+
+            if words:
+                return words
+
+        except Exception as e:
+            pass  # fall through to uniform
+
+        return _uniform_timestamps(transcript, duration)
+
+
+# ---------------------------------------------------------------------------
 # Dataset processing
 # ---------------------------------------------------------------------------
 
@@ -206,14 +351,39 @@ def process_common_voice(
     min_duration: float = 1.0,
     max_duration: float = 30.0,
     resume_from: int = 0,
+    use_forced_alignment: bool = True,
+    aligner: "WhisperXAligner" = None,
 ):
-    """Process a locally-downloaded Common Voice dataset through Whisper.
+    """Process a locally-downloaded Common Voice dataset.
+
+    When `use_forced_alignment=True` (the default), the CV `sentence` field is
+    **always** used as the authoritative transcript text — Whisper's free-form
+    output is never used for the text.  Only word-level *timestamps* are
+    obtained via one of three fallback tiers:
+
+        Tier 1 — WhisperX forced alignment (best)
+            Requires `aligner` to be a loaded ``WhisperXAligner``.
+            Uses a wav2vec2 phoneme model to pin the known text to the audio
+            timeline.  Produces accurate timestamps even for low-resource
+            languages like Swahili.
+
+        Tier 2 — Whisper + initial_prompt (good)
+            Used when WhisperX is unavailable.  Passes the CV sentence as
+            ``initial_prompt`` so Whisper's decoding stays close to the known
+            text, yielding much better timestamps than free-form transcription.
+
+        Tier 3 — Uniform distribution (acceptable fallback)
+            Triggered only if Whisper itself crashes.  Timestamps are
+            inaccurate but non-empty so downstream steps don't break.
+
+    When `use_forced_alignment=False`, the old behaviour is preserved:
+    Whisper transcribes freely and its output text is used.
 
     Args:
         lang: Language code (e.g., "sw", "en")
         split: TSV split file ("validated", "train", "dev", "test", "other")
         output_dir: Output directory for JSON transcriptions
-        transcriber: WhisperTranscriber instance
+        transcriber: WhisperTranscriber instance (used for Tier 2 fallback)
         dataset_dir: Path to the extracted Common Voice language directory,
             e.g. "/content/cv-corpus-19.0-2024-09-13/sw".
             This directory should contain clips/ and <split>.tsv files.
@@ -221,6 +391,10 @@ def process_common_voice(
         min_duration: Skip clips shorter than this (seconds)
         max_duration: Skip clips longer than this (seconds)
         resume_from: Resume from this sample index
+        use_forced_alignment: If True, use CV `sentence` as text and forced-
+            align for timestamps (recommended for all CV languages).
+        aligner: Optional ``WhisperXAligner`` instance.  Required for Tier 1;
+            falls back to Tier 2 if None or unavailable.
     """
     from data.prepare.local_cv_loader import CommonVoiceLocal
 
@@ -229,6 +403,12 @@ def process_common_voice(
             "--dataset_dir is required. Point it to the extracted Common Voice "
             "language directory, e.g. /content/cv-corpus-19.0-2024-09-13/sw"
         )
+
+    if use_forced_alignment:
+        tier = "WhisperX" if (aligner is not None and aligner.available) else "Whisper+prompt"
+        print(f"  Timestamp tier: {tier} (text always from CV sentence)")
+    else:
+        print("  Timestamp tier: Whisper free-form transcription")
 
     print(f"Loading Common Voice {lang} (split={split}) from {dataset_dir}...")
     ds = CommonVoiceLocal(dataset_dir=dataset_dir, split=split, load_audio=True)
@@ -265,14 +445,58 @@ def process_common_voice(
                 skipped += 1
                 continue
 
-            try:
-                result = transcriber.transcribe_audio_array(
-                    audio_array, sr=sr, language=lang
-                )
+            cv_sentence = sample.get("sentence", "").strip()
 
-                # Add metadata
+            try:
+                if use_forced_alignment:
+                    # ---------------------------------------------------------
+                    # Tier 1: WhisperX forced alignment
+                    # ---------------------------------------------------------
+                    if aligner is not None and aligner.available:
+                        words = aligner.align(audio_array, sr, cv_sentence)
+                        whisper_text = ""
+                        language_probability = 1.0
+                    else:
+                        # -----------------------------------------------------
+                        # Tier 2: Whisper guided by initial_prompt=cv_sentence
+                        # -----------------------------------------------------
+                        whisper_result = transcriber.transcribe_audio_array(
+                            audio_array, sr=sr, language=lang,
+                            initial_prompt=cv_sentence if cv_sentence else None,
+                        )
+                        words = whisper_result.get("words", [])
+                        whisper_text = whisper_result.get("text", "")
+                        language_probability = whisper_result.get("language_probability", 1.0)
+
+                    # Tier 3 fallback: uniform distribution if timestamps empty
+                    if not words and cv_sentence:
+                        words = _uniform_timestamps(cv_sentence, duration)
+
+                    text = cv_sentence  # CV sentence is ALWAYS the authoritative text
+
+                    result = {
+                        "text": text,
+                        "words": words,
+                        "segments": [],           # segment-level data not needed downstream
+                        "language": lang,
+                        "language_probability": language_probability,
+                        "duration": round(duration, 3),
+                        "whisper_text": whisper_text,  # kept for debugging only
+                        "forced_alignment": True,
+                    }
+
+                else:
+                    # ---------------------------------------------------------
+                    # Legacy path: free-form Whisper transcription
+                    # ---------------------------------------------------------
+                    result = transcriber.transcribe_audio_array(
+                        audio_array, sr=sr, language=lang
+                    )
+                    result["forced_alignment"] = False
+
+                # Add metadata common to both paths
                 result["sample_idx"] = i
-                result["original_sentence"] = sample.get("sentence", "")
+                result["original_sentence"] = cv_sentence
                 result["client_id"] = sample.get("client_id", "")
                 result["path"] = sample.get("path", "")
                 result["audio_duration"] = round(duration, 3)
@@ -287,7 +511,7 @@ def process_common_voice(
                     "idx": i,
                     "file": f"{lang}_{i:07d}.json",
                     "text": result["text"],
-                    "original": result["original_sentence"],
+                    "original": cv_sentence,
                     "duration": result["audio_duration"],
                     "n_words": len(result["words"]),
                 }
@@ -384,9 +608,10 @@ def process_kenspeech(
                 continue
 
             try:
-                # Run Whisper only for word-level timestamps
+                # Run Whisper guided by the known transcript for better timestamps
                 whisper_result = transcriber.transcribe_audio_array(
-                    audio_array, sr=sr, language=lang
+                    audio_array, sr=sr, language=lang,
+                    initial_prompt=kenspeech_transcript,
                 )
 
                 # Use KenSpeech transcript as the authoritative text,
@@ -534,6 +759,21 @@ def main():
                         help="Path to local KenSpeech dataset directory "
                              "(e.g. /kaggle/input/kenspeech-sw). "
                              "If omitted, downloads from HuggingFace.")
+
+    # Forced alignment flags (default ON for Common Voice)
+    forced_group = parser.add_mutually_exclusive_group()
+    forced_group.add_argument(
+        "--forced_alignment", dest="forced_alignment", action="store_true",
+        default=True,
+        help="Use CV sentence as text + forced alignment for timestamps "
+             "(default: enabled for common_voice source). "
+             "Requires: pip install whisperx",
+    )
+    forced_group.add_argument(
+        "--no_forced_alignment", dest="forced_alignment", action="store_false",
+        help="Disable forced alignment — use free-form Whisper transcription instead.",
+    )
+
     args = parser.parse_args()
 
     transcriber = WhisperTranscriber(
@@ -541,6 +781,16 @@ def main():
         device=args.device,
         compute_type=args.compute_type,
     )
+
+    # Instantiate WhisperXAligner for common_voice when forced alignment is on
+    aligner = None
+    if args.source == "common_voice" and args.forced_alignment:
+        aligner = WhisperXAligner(language=args.lang, device=args.device)
+        if not aligner.available:
+            print(
+                "  WhisperX unavailable — falling back to Whisper+initial_prompt "
+                "for timestamps (text still taken from CV sentence)."
+            )
 
     if args.source == "common_voice":
         process_common_voice(
@@ -553,6 +803,8 @@ def main():
             min_duration=args.min_duration,
             max_duration=args.max_duration,
             resume_from=args.resume_from,
+            use_forced_alignment=args.forced_alignment,
+            aligner=aligner,
         )
     elif args.source == "kenspeech":
         process_kenspeech(

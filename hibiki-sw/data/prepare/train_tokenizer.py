@@ -47,19 +47,19 @@ def download_text_data(
     print("Collecting text data...")
     texts = []
 
-    # KenSpeech Swahili transcripts
+    # KenSpeech Swahili transcripts — load ALL (~6000 utterances, no cap)
     if use_kenspeech:
-        from data.prepare.kenspeech_loader import KenSpeechLoader
-        print("  Loading KenSpeech Swahili transcripts...")
+        from datasets import load_dataset as _load_dataset
+        print("  Loading KenSpeech Swahili transcripts (Kencorpus/KenSpeech)...")
         try:
-            ks = KenSpeechLoader(load_audio=False)
+            ks_ds = _load_dataset("Kencorpus/KenSpeech", split="train")
             count = 0
-            for sentence in ks.text_iterator():
-                texts.append(sentence)
-                count += 1
-                if count >= num_sentences // 6:
-                    break
-            print(f"    Loaded {count} sentences")
+            for sample in ks_ds:
+                transcript = sample.get("transcript", "").strip()
+                if transcript:
+                    texts.append(transcript)
+                    count += 1
+            print(f"    Loaded {count} KenSpeech sentences")
         except Exception as e:
             print(f"  Warning: Could not load KenSpeech: {e}")
 

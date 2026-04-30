@@ -40,20 +40,18 @@ def load_text_sources(
 
     texts = []
 
-    # KenSpeech Swahili transcripts
+    # KenSpeech Swahili transcripts — load ALL (~6000 utterances, no cap)
     if use_kenspeech:
-        from data.prepare.kenspeech_loader import KenSpeechLoader
-        print("Loading KenSpeech Swahili transcripts...")
+        print("Loading KenSpeech Swahili transcripts (Kencorpus/KenSpeech)...")
         try:
-            ks = KenSpeechLoader(load_audio=False)
+            ks_ds = load_dataset("Kencorpus/KenSpeech", split="train")
             count = 0
-            for sentence in ks.text_iterator():
-                if len(sentence) > 10:
-                    texts.append(sentence)
+            for sample in ks_ds:
+                transcript = sample.get("transcript", "").strip()
+                if len(transcript) > 10:
+                    texts.append(transcript)
                     count += 1
-                if count >= max_samples // 4:
-                    break
-            print(f"  Loaded {count} sentences")
+            print(f"  Loaded {count} KenSpeech sentences")
         except Exception as e:
             print(f"  Warning: Could not load KenSpeech: {e}")
 

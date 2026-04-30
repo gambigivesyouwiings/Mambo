@@ -97,13 +97,45 @@ def translate_one(
     max_new_tokens: int = 200,
     device: str = "cuda",
 ) -> Dict:
-    """Run the full transcript-prompted ST pipeline on a single audio array."""
+    """Run the full transcript-prompted ST pipeline on a single audio array.
+
+    Transcription uses the Whisper decoder in sw+transcribe mode (more reliable
+    than the CTC head at low data regimes). Translation then uses the fine-tuned
+    decoder prompted with the recovered transcript.
+    """
     tokenizer = processor.tokenizer
 
-    # 1) Encode + CTC transcript
     feats = processor.feature_extractor(audio, sampling_rate=16000, return_tensors="pt").input_features.to(device)
-    transcripts = model.ctc_greedy_decode(feats, tokenizer)
-    transcript = transcripts[0]
+
+    sot = tokenizer.convert_tokens_to_ids("<|startoftranscript|>")
+    sw = tokenizer.convert_tokens_to_ids("<|sw|>")
+    en = tokenizer.convert_tokens_to_ids("<|en|>")
+    transcribe = tokenizer.convert_tokens_to_ids("<|transcribe|>")
+    translate = tokenizer.convert_tokens_to_ids("<|translate|>")
+    notim = tokenizer.convert_tokens_to_ids("<|notimestamps|>")
+    eot_id = tokenizer.eos_token_id
+
+    encoder_outputs = model.model.encoder(input_features=feats, return_dict=True)
+    encoder_hidden = encoder_outputs.last_hidden_state
+
+    def greedy_decode(prompt, stop_extra=()):
+        ids = prompt[:]
+        for _ in range(max_new_tokens):
+            dec_out = model.model.decoder(
+                input_ids=torch.tensor([ids], dtype=torch.long, device=device),
+                encoder_hidden_states=encoder_hidden,
+                return_dict=True,
+            )
+            nxt = model.proj_out(dec_out.last_hidden_state[:, -1, :]).argmax(dim=-1).item()
+            ids.append(nxt)
+            if nxt == eot_id or nxt in stop_extra:
+                break
+        return ids
+
+    # 1) Transcribe in sw+transcribe mode; stop at EOT or language-switch token
+    trans_ids = greedy_decode([sot, sw, transcribe, notim], stop_extra=(en,))
+    transcript_token_ids = [t for t in trans_ids[4:] if t not in (eot_id, en)]
+    transcript = tokenizer.decode(transcript_token_ids, skip_special_tokens=True).strip()
 
     # 2) Lexicon lookup (optional)
     lexicon_hits = []
@@ -112,43 +144,11 @@ def translate_one(
         lexicon_hits = lookup_lexicon(transcript, lexicon)
         hint = format_lexicon_hint(lexicon_hits)
 
-    # 3) Build decoder prompt
-    sot = tokenizer.convert_tokens_to_ids("<|startoftranscript|>")
-    sw = tokenizer.convert_tokens_to_ids("<|sw|>")
-    en = tokenizer.convert_tokens_to_ids("<|en|>")
-    transcribe = tokenizer.convert_tokens_to_ids("<|transcribe|>")
-    translate = tokenizer.convert_tokens_to_ids("<|translate|>")
-    notim = tokenizer.convert_tokens_to_ids("<|notimestamps|>")
-
-    transcript_with_hint = transcript + hint
-    transcript_ids = tokenizer(transcript_with_hint, add_special_tokens=False).input_ids
-
-    decoder_prompt = (
-        [sot, sw, transcribe, notim]
-        + transcript_ids
-        + [en, translate, notim]
-    )
-
-    # 4) Generate translation with manual greedy decode (avoids transformers
-    #    generate() API churn around input_features vs encoder_outputs across versions)
-    encoder_outputs = model.model.encoder(input_features=feats, return_dict=True)
-    encoder_hidden = encoder_outputs.last_hidden_state
-
-    eot_id = tokenizer.eos_token_id
-    generated_ids = decoder_prompt[:]
-    for _ in range(max_new_tokens):
-        dec_ids = torch.tensor([generated_ids], dtype=torch.long, device=device)
-        dec_out = model.model.decoder(
-            input_ids=dec_ids,
-            encoder_hidden_states=encoder_hidden,
-            return_dict=True,
-        )
-        next_token = model.proj_out(dec_out.last_hidden_state[:, -1, :]).argmax(dim=-1).item()
-        generated_ids.append(next_token)
-        if next_token == eot_id:
-            break
-
-    new_tokens = generated_ids[len(decoder_prompt):]
+    # 3) Build translation prompt and decode
+    prompt_ids = tokenizer(transcript + hint, add_special_tokens=False).input_ids
+    translation_prompt = [sot, sw, transcribe, notim] + prompt_ids + [en, translate, notim]
+    gen_ids = greedy_decode(translation_prompt)
+    new_tokens = [t for t in gen_ids[len(translation_prompt):] if t != eot_id]
     translation = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
     return {
