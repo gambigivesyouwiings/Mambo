@@ -96,12 +96,17 @@ def translate_one(
     lexicon: Optional[Dict[str, str]] = None,
     max_new_tokens: int = 200,
     device: str = "cuda",
+    forced_transcript: Optional[str] = None,
 ) -> Dict:
     """Run the full transcript-prompted ST pipeline on a single audio array.
 
     Transcription uses the Whisper decoder in sw+transcribe mode (more reliable
     than the CTC head at low data regimes). Translation then uses the fine-tuned
     decoder prompted with the recovered transcript.
+
+    If `forced_transcript` is supplied, Pass 1 is skipped and that string is
+    used as the prompt for Pass 2 directly. Used to isolate the translation
+    head's quality from the (possibly broken) autoregressive transcription pass.
     """
     tokenizer = processor.tokenizer
 
@@ -132,10 +137,13 @@ def translate_one(
                 break
         return ids
 
-    # 1) Transcribe in sw+transcribe mode; stop at EOT or language-switch token
-    trans_ids = greedy_decode([sot, sw, transcribe, notim], stop_extra=(en,))
-    transcript_token_ids = [t for t in trans_ids[4:] if t not in (eot_id, en)]
-    transcript = tokenizer.decode(transcript_token_ids, skip_special_tokens=True).strip()
+    # 1) Transcribe — use forced transcript if provided, else autoregressive Pass 1
+    if forced_transcript is not None:
+        transcript = forced_transcript.strip()
+    else:
+        trans_ids = greedy_decode([sot, sw, transcribe, notim], stop_extra=(en,))
+        transcript_token_ids = [t for t in trans_ids[4:] if t not in (eot_id, en)]
+        transcript = tokenizer.decode(transcript_token_ids, skip_special_tokens=True).strip()
 
     # 2) Lexicon lookup (optional)
     lexicon_hits = []
@@ -167,6 +175,11 @@ def main():
     parser.add_argument("--output_path", type=str, required=True)
     parser.add_argument("--lexicon_path", type=str, default=None,
                         help="Optional JSONL lexicon for prompt augmentation")
+    parser.add_argument("--reference_transcripts", type=str, default=None,
+                        help="Diagnostic: JSONL with {audio, reference_sw} entries. When set, "
+                             "skips Pass 1 (autoregressive transcription) and uses the reference "
+                             "Sw transcript as the Pass 2 prompt directly. Isolates translation "
+                             "quality from transcription quality.")
     parser.add_argument("--max_new_tokens", type=int, default=200)
     parser.add_argument("--max_samples", type=int, default=None)
     args = parser.parse_args()
@@ -178,6 +191,19 @@ def main():
     model.eval()
 
     lexicon = load_lexicon(args.lexicon_path) if args.lexicon_path else None
+
+    ref_transcripts: Optional[Dict[str, str]] = None
+    if args.reference_transcripts:
+        ref_transcripts = {}
+        with open(args.reference_transcripts, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                    if "audio" in e and "reference_sw" in e:
+                        ref_transcripts[e["audio"]] = e["reference_sw"]
+                except Exception:
+                    continue
+        print(f"Loaded {len(ref_transcripts)} reference transcripts (Pass 1 will be skipped)")
 
     wavs = sorted(Path(args.audio_dir).glob("*.wav"))
     if args.max_samples:
@@ -197,10 +223,16 @@ def main():
             if audio.ndim > 1:
                 audio = audio.mean(axis=1)
 
+            forced = ref_transcripts.get(wav_path.name) if ref_transcripts else None
+            if ref_transcripts and forced is None:
+                # Skip files we don't have a reference transcript for, in diag mode
+                continue
+
             try:
                 result = translate_one(
                     audio, model, processor, lexicon=lexicon,
                     max_new_tokens=args.max_new_tokens, device=device,
+                    forced_transcript=forced,
                 )
             except Exception as e:
                 print(f"  Error on {wav_path.name}: {e}")
