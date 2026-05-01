@@ -26,6 +26,7 @@ ASR_ROOT=${ASR_ROOT:-$DATA_ROOT/asr_runs}
 
 # Inputs
 KENSPEECH_DIR=${KENSPEECH_DIR:-$DATA_ROOT/kenspeech/kenspeech-sw}
+CV_LOCAL_DIR=${CV_LOCAL_DIR:-$DATA_ROOT/cv-swahili/cv-swahili-validated}
 FLEURS_TEST_DIR=${FLEURS_TEST_DIR:-$DATA_ROOT/runs/fleurs_sw_ke_test}
 
 # Outputs
@@ -36,8 +37,9 @@ PSEUDO_GOLD=${PSEUDO_GOLD:-$PSEUDO_DIR/pseudo_labels_gold.jsonl}
 
 # Pseudo-labeling caps (use to keep teacher inference under budget)
 MAX_PER_SOURCE=${MAX_PER_SOURCE:-}   # empty = unlimited
-CV_VERSION=${CV_VERSION:-17_0}
 TEACHER_MODEL=${TEACHER_MODEL:-openai/whisper-large-v3}
+# Source list: cv_sw_local uses CV_LOCAL_DIR; cv_sw uses HF (requires auth + ToS).
+SOURCES=${SOURCES:-"fleurs_sw_train cv_sw_local"}
 
 # Filter thresholds
 CONF_THRESH=${CONF_THRESH:--1.0}
@@ -99,8 +101,8 @@ MAX_FLAG=""
 python whisper_asr/pseudo_label.py \
     --out_dir "$PSEUDO_DIR" \
     --teacher_model "$TEACHER_MODEL" \
-    --sources fleurs_sw_train cv_sw \
-    --cv_version "$CV_VERSION" \
+    --sources $SOURCES \
+    --cv_local_dir "$CV_LOCAL_DIR" \
     --precision bf16 \
     $MAX_FLAG 2>&1 | tee -a "$ASR_ROOT/pseudo_label.log"
 

@@ -65,6 +65,53 @@ def _iter_common_voice(version: str = "17_0", max_samples: Optional[int] = None)
             }
 
 
+def _iter_common_voice_local(local_dir: str, max_samples: Optional[int] = None) -> Iterable[Dict]:
+    """Mozilla CV-Sw from a locally extracted dataset (Kaggle layout).
+
+    Expected directory layout:
+        local_dir/
+            clips/*.mp3
+            validated.tsv     # standard CV columns: client_id, path, sentence, ...
+    """
+    import csv
+    import librosa
+
+    root = Path(local_dir)
+    tsv_path = root / "validated.tsv"
+    clips_dir = root / "clips"
+
+    if not tsv_path.exists():
+        raise FileNotFoundError(f"Expected validated.tsv at {tsv_path}")
+    if not clips_dir.exists():
+        raise FileNotFoundError(f"Expected clips/ at {clips_dir}")
+
+    with open(tsv_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        emitted = 0
+        for row in reader:
+            if max_samples is not None and emitted >= max_samples:
+                break
+            rel_path = (row.get("path") or "").strip()
+            sentence = (row.get("sentence") or "").strip()
+            if not rel_path or not sentence:
+                continue
+            audio_path = clips_dir / rel_path
+            if not audio_path.exists():
+                continue
+            try:
+                audio, _ = librosa.load(str(audio_path), sr=16000, mono=True)
+            except Exception as e:
+                print(f"  [skip] failed to load {audio_path}: {e}")
+                continue
+            yield {
+                "id": Path(rel_path).stem,  # e.g. "common_voice_sw_12345"
+                "audio_array": audio.astype(np.float32),
+                "sampling_rate": 16000,
+                "gold_label": sentence,
+            }
+            emitted += 1
+
+
 def _iter_fleurs_sw_train(max_samples: Optional[int] = None) -> Iterable[Dict]:
     from datasets import load_dataset
     ds = load_dataset("google/fleurs", "sw_ke", split="train", trust_remote_code=True)
@@ -81,6 +128,7 @@ def _iter_fleurs_sw_train(max_samples: Optional[int] = None) -> Iterable[Dict]:
 
 SOURCE_LOADERS = {
     "cv_sw": _iter_common_voice,
+    "cv_sw_local": _iter_common_voice_local,
     "fleurs_sw_train": _iter_fleurs_sw_train,
 }
 
@@ -163,7 +211,10 @@ def main():
     parser.add_argument("--sources", nargs="+", default=["fleurs_sw_train", "cv_sw"],
                         choices=list(SOURCE_LOADERS.keys()))
     parser.add_argument("--cv_version", default="17_0",
-                        help="Common Voice version suffix, e.g. '17_0' for cv_17_0")
+                        help="Common Voice version suffix, e.g. '17_0' for cv_17_0 (HF-based loader only)")
+    parser.add_argument("--cv_local_dir", default=None,
+                        help="Local directory containing CV-Sw with clips/ + validated.tsv "
+                             "(used by the cv_sw_local source).")
     parser.add_argument("--max_per_source", type=int, default=None,
                         help="Cap samples per source. None = all.")
     parser.add_argument("--max_audio_seconds", type=float, default=30.0,
@@ -198,6 +249,10 @@ def main():
             kwargs = {"max_samples": args.max_per_source}
             if source == "cv_sw":
                 kwargs["version"] = args.cv_version
+            elif source == "cv_sw_local":
+                if not args.cv_local_dir:
+                    raise ValueError("--cv_local_dir is required when source is cv_sw_local")
+                kwargs["local_dir"] = args.cv_local_dir
 
             n_done_this_source = 0
             n_skipped_dup = 0
