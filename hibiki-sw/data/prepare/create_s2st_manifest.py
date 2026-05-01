@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -184,10 +185,121 @@ def create_directory_manifest(
     return len(entries)
 
 
+def create_synthetic_manifest(
+    source_token_dir: str,
+    target_token_dir: str,
+    translation_dir: str,
+    text_token_dir: str,
+    output_path: str,
+    tokenizer_path: str,
+    target_lang: str = "en",
+    max_frames: int = 250,
+    voice_category: int = 2,
+):
+    """Create manifest from the synthetic pipeline output (00b_data_pipeline).
+
+    Handles the naming convention produced by the pipeline:
+        source tokens:  {stem}.npy           (e.g. sw_0000001.npy)
+        target tokens:  {stem}_{tgt}.npy     (e.g. sw_0000001_en.npy)
+        translation:    {stem}_{tgt}.json    (e.g. sw_0000001_en.json)
+
+    Also creates aligned text tokens from translated text for the inner-
+    monologue text stream needed during Stage 3/4 training.
+
+    Args:
+        source_token_dir: Mimi tokens for source audio (e.g. kenspeech_sw/)
+        target_token_dir: Mimi tokens for synthesized audio (e.g. synth_en/)
+        translation_dir:  Translation JSONs with translated_text field
+        text_token_dir:   Output directory for aligned text .npy files
+        output_path:      Output TSV manifest path
+        tokenizer_path:   SentencePiece .model for text tokenization
+        target_lang:      Target language code (en or sw)
+        max_frames:       Skip pairs longer than this many Mimi frames (~20s)
+        voice_category:   Default voice similarity category (0-4)
+    """
+    sp = spm.SentencePieceProcessor()
+    sp.load(tokenizer_path)
+    print(f"Loaded tokenizer: vocab_size={sp.get_piece_size()}")
+
+    os.makedirs(text_token_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    source_files = sorted(Path(source_token_dir).glob("*.npy"))
+    print(f"Scanning {len(source_files)} source token files...")
+
+    entries = []
+    skipped_no_target = 0
+    skipped_no_trans = 0
+    skipped_too_long = 0
+    skipped_error = 0
+
+    for src_path in tqdm(source_files, desc="Building manifest"):
+        src_stem = src_path.stem  # e.g. "sw_0000001"
+
+        # Target token: stem + "_" + target_lang
+        tgt_stem = f"{src_stem}_{target_lang}"
+        tgt_path = Path(target_token_dir) / f"{tgt_stem}.npy"
+
+        if not tgt_path.exists():
+            skipped_no_target += 1
+            continue
+
+        # Find translation JSON for the target text
+        trans_path = Path(translation_dir) / f"{tgt_stem}.json"
+        if not trans_path.exists():
+            skipped_no_trans += 1
+            continue
+
+        try:
+            # Load tokens to check frame counts
+            src_tokens = np.load(str(src_path), mmap_mode="r")
+            tgt_tokens = np.load(str(tgt_path), mmap_mode="r")
+
+            if src_tokens.shape[1] > max_frames or tgt_tokens.shape[1] > max_frames:
+                skipped_too_long += 1
+                continue
+
+            # Load translated text for inner monologue stream
+            with open(trans_path, "r", encoding="utf-8") as f:
+                trans_data = json.load(f)
+
+            translated_text = trans_data.get("translated_text", "").strip()
+            if not translated_text:
+                skipped_error += 1
+                continue
+
+            # Create aligned text tokens
+            text_ids = sp.encode(translated_text, out_type=int)
+            T_tgt = tgt_tokens.shape[1]
+            aligned_text = create_aligned_text_tokens(text_ids, T_tgt)
+
+            txt_path = os.path.join(text_token_dir, f"{tgt_stem}.npy")
+            np.save(txt_path, aligned_text.astype(np.int32))
+
+            entries.append((str(src_path), str(tgt_path), txt_path, voice_category))
+
+        except Exception as e:
+            skipped_error += 1
+            if skipped_error <= 5:
+                print(f"  Error on {src_stem}: {e}")
+            continue
+
+    # Write manifest
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("# source_audio\ttarget_audio\ttext\tvoice_category\n")
+        for src, tgt, txt, vc in entries:
+            f.write(f"{src}\t{tgt}\t{txt}\t{vc}\n")
+
+    print(f"\nManifest: {len(entries)} entries -> {output_path}")
+    print(f"  Skipped: {skipped_no_target} no target, {skipped_no_trans} no translation, "
+          f"{skipped_too_long} too long, {skipped_error} errors")
+    return len(entries)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Create S2ST manifest")
     parser.add_argument("--source", type=str, default="fleurs",
-                        choices=["fleurs", "kenspeech", "directory"],
+                        choices=["fleurs", "synthetic", "directory"],
                         help="Data source type")
     parser.add_argument("--source_token_dir", type=str, required=True,
                         help="Directory with source audio .npy tokens")
@@ -199,10 +311,18 @@ def main():
                         help="Output TSV manifest path")
     parser.add_argument("--tokenizer_model", type=str, default=None,
                         help="SentencePiece model for text tokenization")
+    parser.add_argument("--translation_dir", type=str, default=None,
+                        help="Translation JSON directory (required for --source synthetic)")
     parser.add_argument("--max_frames", type=int, default=250)
-    parser.add_argument("--direction", type=str, default="en2sw",
+    parser.add_argument("--direction", type=str, default="sw2en",
                         choices=["en2sw", "sw2en"])
+    parser.add_argument("--target_lang", type=str, default=None,
+                        help="Target language code (inferred from --direction if omitted)")
     args = parser.parse_args()
+
+    # Infer target_lang from direction if not set
+    if args.target_lang is None:
+        args.target_lang = args.direction.split("2")[1]  # "sw2en" -> "en"
 
     if args.source == "fleurs":
         create_fleurs_manifest(
@@ -213,7 +333,22 @@ def main():
             tokenizer_path=args.tokenizer_model,
             max_frames=args.max_frames,
         )
-    elif args.source in ("kenspeech", "directory"):
+    elif args.source == "synthetic":
+        if not args.translation_dir:
+            parser.error("--translation_dir is required for --source synthetic")
+        if not args.tokenizer_model:
+            parser.error("--tokenizer_model is required for --source synthetic")
+        create_synthetic_manifest(
+            source_token_dir=args.source_token_dir,
+            target_token_dir=args.target_token_dir,
+            translation_dir=args.translation_dir,
+            text_token_dir=args.text_token_dir,
+            output_path=args.output_manifest,
+            tokenizer_path=args.tokenizer_model,
+            target_lang=args.target_lang,
+            max_frames=args.max_frames,
+        )
+    elif args.source == "directory":
         create_directory_manifest(
             source_dir=args.source_token_dir,
             target_dir=args.target_token_dir,
