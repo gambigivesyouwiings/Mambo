@@ -217,9 +217,18 @@ class KenSpeechSTDataset(Dataset):
             prefix + transcript_ids + switch + translation_ids + [self.eot_id]
         )
 
-        # Labels: -100 for everything except the translation portion + final EOT
-        labels = [-100] * (len(prefix) + len(transcript_ids) + len(switch))
-        labels += translation_ids + [self.eot_id]
+        # Labels: at position i we want the model to predict decoder_input_ids[i+1]
+        # (next-token objective). Mask everything except positions whose target is
+        # in the translation portion or the final EOT. Last position has no next
+        # token so it's masked.
+        prefix_len = len(prefix) + len(transcript_ids) + len(switch)
+        labels = [-100] * len(decoder_input_ids)
+        # Position prefix_len-1 (input = last switch token "notimestamps") predicts translation_ids[0]
+        # Position prefix_len+k (input = translation_ids[k]) predicts translation_ids[k+1]
+        # Position len-2 (input = last translation token) predicts EOT
+        # Position len-1 (input = EOT) has no successor — stays -100
+        for i in range(prefix_len - 1, len(decoder_input_ids) - 1):
+            labels[i] = decoder_input_ids[i + 1]
 
         # Truncate if too long
         if len(decoder_input_ids) > self.max_label_tokens:
