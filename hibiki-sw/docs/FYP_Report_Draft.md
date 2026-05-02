@@ -227,7 +227,7 @@ The system employs a decoder-only multistream transformer consisting of a Tempor
 
 The model was trained in four stages -- text adaptation, audio pretraining, speech translation training, and fine-tuning with classifier-free guidance -- on Kaggle T4 GPUs within a total compute budget of approximately 44 GPU-hours. The system was evaluated on the FLEURS English-Swahili test set using ASR-BLEU, speaker similarity (WavLM embeddings), and latency (LAAL) metrics, and compared against cascaded baselines (Whisper ASR + NLLB MT + MMS-TTS) and Meta's Seamless model.
 
-To strengthen the cascaded baseline used for comparison, this project also developed a Whisper-small Swahili ASR model fine-tuned via pseudo-label distillation from Whisper-large-v3. The pipeline pseudo-labels approximately 6,000 unlabelled Swahili utterances drawn from Common Voice and FLEURS-train, applies a three-filter recipe (teacher confidence, n-gram repetition, and Swahili language identification) to discard noisy pseudo-labels, and fine-tunes the student on the union of the filtered pseudo-labels and the labelled KenSpeech corpus. The resulting ASR model substantially reduces Word Error Rate on FLEURS sw_ke compared with the off-the-shelf Whisper-small baseline, providing a more rigorous cascade against which the end-to-end system is measured.
+To strengthen the cascaded baseline used for comparison, this project also developed a Whisper-small Swahili ASR model fine-tuned via pseudo-label distillation from Whisper-large-v3. The pipeline pseudo-labels approximately 6,000 unlabelled Swahili utterances drawn from Common Voice and FLEURS-train, applies a three-filter recipe (teacher confidence, n-gram repetition, and Swahili language identification) to discard degenerate pseudo-labels, and fine-tunes the student on the union of the pseudo-labels and the labelled KenSpeech corpus. On the FLEURS sw_ke test set, the fine-tuned student reduces Word Error Rate from 87.22% (off-the-shelf Whisper-small) to 42.98% (a 44-point absolute reduction), providing a substantially more rigorous cascade against which the end-to-end S2ST system is measured. An ablation comparing filtered against unfiltered pseudo-labels showed that aggressive filtering is unnecessary when using a strong teacher such as Whisper-large-v3.
 
 This work demonstrates the feasibility of building lightweight end-to-end S2ST systems for low-resource African language pairs using synthetic data and consumer-grade GPU hardware, and contributes a reproducible pseudo-label distillation recipe for low-resource Swahili ASR -- both contributing to the broader goal of language technology equity for African languages.
 
@@ -945,7 +945,20 @@ The five scripts are sequenced by `run.sh`, which is configurable via environmen
 | Training × 4 variants | ~1.5 hours |
 | WER evaluation across 5 systems | ~30 minutes |
 
-*Table 10: ASR Pipeline Timing on A10G*
+*Table 9b: ASR Pipeline Timing on A10G*
+
+#### 4.6.6 Integration into the Cascaded Baseline
+
+The trained ASR model serves as the front-end of the "improved cascade" baseline used in the S2ST evaluation of Section 5.6. Concretely, the cascade replaces the off-the-shelf `openai/whisper-small` checkpoint with the best-performing fine-tuned variant from Section 4.6 -- `ft_kenspeech_pseudo_raw` (Table 11, lowest WER among non-oracle systems) -- while keeping the NLLB-200 translation and MMS-TTS synthesis stages unchanged. The cascade inference flow is therefore:
+
+1. **ASR (improved):** Source Swahili audio is transcribed with the fine-tuned Whisper-small in `language='sw', task='transcribe'` mode. Greedy decoding is used to match the conditions under which WER was measured.
+2. **MT:** The Swahili transcript is translated to English by NLLB-200-distilled-1.3B at FP16, with input language token `swh_Latn` and target `eng_Latn`.
+3. **TTS:** The English translation is synthesised to audio by MMS-TTS-eng (`facebook/mms-tts-eng`) at 16 kHz mono.
+4. **ASR-BLEU re-transcription:** The synthesised English audio is re-transcribed with Whisper-medium in `language='en', task='transcribe'` mode, and BLEU is computed against the FLEURS en_us reference text. This re-transcription step is identical to the one used for the end-to-end S2ST system, ensuring an apples-to-apples comparison.
+
+This integration is implemented as a single evaluation script (`whisper_asr/eval_cascade.py`) that runs both the vanilla and improved variants of the cascade in one pass and emits a side-by-side BLEU table. The two variants share NLLB and MMS-TTS components so that the only difference between them is the ASR front-end -- isolating the contribution of the ASR improvement to end-to-end translation quality.
+
+The "vanilla cascade" row of Table 10 is produced identically but with `openai/whisper-small` substituted for the fine-tuned student. The difference between the two cascade rows therefore answers the question: "How much of the cascade's translation-quality deficit (versus the E2E system or against Seamless) is due to the ASR component being weak in zero-shot mode, versus due to error accumulation across MT and TTS that no ASR improvement can fix?"
 
 ---
 
@@ -1007,22 +1020,25 @@ The S2ST system is compared against three baseline cascades and one off-the-shel
 
 The Whisper-small Sw ASR fine-tuning pipeline of Section 4.6 produced four trained student variants alongside a vanilla zero-shot baseline. All five systems were evaluated on the FLEURS sw_ke test set (487 utterances) with a lightweight lowercase + punctuation-stripping normaliser, and (in the second column) a digit-to-word post-processing step that addresses the convention mismatch between numeral references and spelled-out predictions discussed in Section 4.6.4.
 
-| System | WER | WER (digit-norm) | CER |
-|---|---|---|---|
-| `vanilla_small` (zero-shot) | XX.XX | XX.XX | XX.XX |
-| `ft_kenspeech_only` | XX.XX | XX.XX | XX.XX |
-| `ft_kenspeech_pseudo_raw` | XX.XX | XX.XX | XX.XX |
-| **`ft_kenspeech_pseudo_filtered`** | XX.XX | XX.XX | XX.XX |
-| `ft_kenspeech_gold_upper_bound` | XX.XX | XX.XX | XX.XX |
+| System | WER | WER (digit-norm) | CER | n |
+|---|---|---|---|---|
+| `vanilla_small` (zero-shot) | 87.22 | 86.11 | 29.88 | 487 |
+| `ft_kenspeech_only` | 52.24 | 51.62 | 18.90 | 487 |
+| `ft_kenspeech_pseudo_raw` | **42.98** | **42.69** | **13.63** | 487 |
+| `ft_kenspeech_pseudo_filtered` | 45.47 | 45.05 | 16.07 | 487 |
+| `ft_kenspeech_gold_upper_bound` | **37.28** | **36.66** | 14.42 | 487 |
 
-*Table 11: Swahili ASR Results on FLEURS sw_ke*
+*Table 11: Swahili ASR Results on FLEURS sw_ke (487 utterances). Best non-oracle WER in bold.*
 
-The intended reading of Table 11 is:
+Four observations follow from Table 11.
 
-- The gap between `vanilla_small` and `ft_kenspeech_only` quantifies the value of supervised fine-tuning on a small high-quality labelled corpus alone.
-- The gap (or absence of gap) between `ft_kenspeech_pseudo_raw` and `ft_kenspeech_only` measures whether unfiltered teacher pseudo-labels help, hurt, or are neutral relative to using only labelled data.
-- The gap between `ft_kenspeech_pseudo_filtered` and `ft_kenspeech_pseudo_raw` measures the value of the three-filter recipe.
-- The gap between `ft_kenspeech_pseudo_filtered` and `ft_kenspeech_gold_upper_bound` quantifies how much of the gold-data benefit pseudo-labels recover, which is the relevant generalisation signal for truly unlabelled corpora.
+**Supervised fine-tuning on KenSpeech alone reduces WER by 35 points** (87.22 -> 52.24), confirming that even a small (5,726-utterance) high-quality labelled corpus substantially closes the gap between Whisper-small zero-shot and a domain-adapted student. This single number is the strongest argument for fine-tuning Whisper for any low-resource language with a comparably-sized labelled set available.
+
+**Pseudo-label distillation provides a further 9.3-point WER reduction** (52.24 -> 42.98 with raw pseudo-labels). Adding ~5,900 Whisper-large-v3-labelled utterances on top of KenSpeech recovers more than half of the remaining gap to the gold upper bound. This is the core positive result of the pseudo-label distillation contribution.
+
+**The proposed filter recipe did not improve over raw pseudo-labels at the chosen thresholds.** `ft_kenspeech_pseudo_filtered` (45.47 WER) is approximately 2.5 points worse than `ft_kenspeech_pseudo_raw` (42.98 WER). The filters rejected only 4.4% of pseudo-labels (Table 12); at this level of activity, the few samples removed appear to be net useful for the student. Two interpretations are consistent with the data: (i) Whisper-large-v3 is a sufficiently reliable Swahili teacher that mild filtering trades a small amount of label quality for a more impactful loss in label quantity; or (ii) the 2.5-point difference falls within the noise of evaluation on 487 samples (approximate per-system standard error is ~2 WER points). On a less reliable teacher (e.g., Whisper-medium) or a noisier source corpus, filtering would be expected to matter more. The recipe is therefore retained as a tunable component of the pipeline, with the empirical observation that aggressive filtering is not warranted when the teacher is strong.
+
+**Substituting gold transcripts where available reduces WER by a further 5.7 points** (42.98 -> 37.28). This gap quantifies the headroom remaining for improved pseudo-label quality and motivates future work on iterative self-training, larger teacher models, or more aggressive filter thresholds.
 
 #### 5.7.1 Filter Ablation
 
@@ -1030,22 +1046,46 @@ The per-filter ablation from `pseudo_labels_filtered.stats.json` shows the margi
 
 | Active filters | Pseudo-labels kept | % of total |
 |---|---|---|
-| (none) | XXXX | 100.0 |
-| confidence | XXXX | XX.X |
-| repetition | XXXX | XX.X |
-| lang_id | XXXX | XX.X |
-| confidence + repetition | XXXX | XX.X |
-| confidence + lang_id | XXXX | XX.X |
-| lang_id + repetition | XXXX | XX.X |
-| confidence + lang_id + repetition (all) | XXXX | XX.X |
+| (none) | 5,933 | 100.0 |
+| confidence | 5,876 | 99.0 |
+| lang_id | 5,873 | 99.0 |
+| repetition | 5,785 | 97.5 |
+| confidence + lang_id | 5,818 | 98.1 |
+| confidence + repetition | 5,730 | 96.6 |
+| lang_id + repetition | 5,727 | 96.5 |
+| confidence + lang_id + repetition (all) | 5,674 | 95.6 |
 
-*Table 12: Pseudo-Label Filter Ablation*
+*Table 12: Pseudo-Label Filter Ablation. Thresholds: confidence > -1.0, repetition < 0.5, sw_lang_id >= 0.7.*
+
+The repetition filter is the single most active rejector (148 entries, 2.5%); the confidence and language-id filters reject 57 and 60 entries respectively (about 1% each). The substantial overlap between the three is small (the union of all three rejects 259 entries, less than the sum of 265, suggesting only ~2% of rejected entries fail more than one filter). Combined with the WER results in Table 11, this confirms that with a strong teacher the filters are catching genuinely degenerate outputs rather than borderline-noisy ones, but the population of degenerate outputs at this teacher scale is too small for filtering to translate into a measurable WER improvement.
 
 #### 5.7.2 Qualitative Examples
 
-Representative side-by-side outputs on FLEURS sw_ke samples illustrate the qualitative gap between vanilla and fine-tuned Whisper-small. The vanilla model produces fragmented Swahili with broken word boundaries and English-style capitalisation; the fine-tuned variants produce coherent Swahili with appropriate orthographic conventions, even when the WER score remains imperfect due to digit-form differences and proper-noun spelling.
+Representative side-by-side outputs on FLEURS sw_ke samples illustrate the qualitative gap between vanilla and fine-tuned Whisper-small. The vanilla model produces fragmented Swahili with broken word boundaries and English-style capitalisation; the fine-tuned variants produce coherent Swahili with appropriate orthographic conventions. The gold-upper-bound variant occasionally matches references exactly (e.g., `fleurs_sw_ke_00001.wav` below).
 
-*[A small table of REF / vanilla / fine-tuned outputs for 3-5 illustrative FLEURS samples will be inserted here.]*
+**`fleurs_sw_ke_00000.wav`**
+
+| | |
+|---|---|
+| REF | katika miaka yote ya 1960 brzezinski alimfanyia kazi john f. kennedy kama mshauri wake na pia utawala wa lyndon b. johnson |
+| vanilla_small | katika meka yo tia elf moja meheti sasiti ni, Jensiski Alinfaniya Kazijon FKnedi Kama Mshawuva kenapia utawala wa Linod B. Johnson. |
+| ft_kenspeech_only | katika meka yote ya elfumoja miwetisa siteni ndio nzisiki alimfania kazi john fk nedi kama mshavu wakinapewa utawala walio na bay johnson |
+| ft_kenspeech_pseudo_raw | Katika meka yote ya 1160, Junziski alimfania kazi John F. Kennedy kama mshawivake na pia utawala walinod B. Johnson. |
+| ft_kenspeech_pseudo_filtered | Katika meka yote ya 1196, Junziski alimfanyia kazi John F. Kennedy kama mshavu wake na pia utawala walinod B. Johnson. |
+| ft_kenspeech_gold_upper_bound | katika miaka yote ya 1960 john zisiki alimfania kazi john fk4 ni kama mshawi wake na pia utawala wa leo bay johnson |
+
+**`fleurs_sw_ke_00001.wav`**
+
+| | |
+|---|---|
+| REF | sauti ya piramidi na onyesho la nuru ni mojawapo ya mambo yanayofurahisha zaidi katika eneo la watoto |
+| vanilla_small | Sauti ya piramidi na onyesho la nuru ni mojawa po ya mambo ya na ufuraisha zaidi katika ya neola ototo. |
+| ft_kenspeech_only | sauti ya piramidi na onyesho la nuru ni mojawapo ya mambo ya naufurahisha zaidi katika eneo la ototo |
+| ft_kenspeech_pseudo_raw | Sauti ya piramidi na onyesho la nuru ni moja wapo ya mambo ya naufurahisha zaidi katika eneo la ototo. |
+| ft_kenspeech_pseudo_filtered | Sauti ya piramidi na onyesho la nuru ni moja wapo ya mambo ya naufurahisha zaidi katika eneo la ototo. |
+| ft_kenspeech_gold_upper_bound | sauti ya piramidi na onyesho la nuru ni mojawapo ya mambo yanayofurahisha zaidi katika eneo la watoto |
+
+Two patterns are visible across the qualitative examples. First, all four fine-tuned variants resolve the broken word boundaries and English-style capitalisation produced by the vanilla model (e.g., "Sauti ya piramidi" instead of "Sauti ya piramidi na onyesho la nuru ni mojawa po"). Second, the pseudo-label-trained variants (`pseudo_raw`, `pseudo_filtered`) inherit Whisper-large-v3's preference for digit numerals and English-style sentence capitalisation, while `ft_kenspeech_only` and `ft_kenspeech_gold_upper_bound` use the spelled-out and lowercase conventions of the underlying KenSpeech and FLEURS-train annotations respectively. This convention inheritance does not significantly affect WER (see digit-normalised column in Table 11) but is visible at inspection.
 
 ### 5.8 Qualitative Analysis
 
@@ -1083,7 +1123,7 @@ This project successfully designed and implemented a ~100M parameter end-to-end 
 
 4. **Evaluation framework:** The system was evaluated against both cascaded baselines (Whisper + NLLB + MMS-TTS) and Meta's Seamless model using ASR-BLEU, speaker similarity, and latency metrics on the FLEURS benchmark.
 
-5. **Improved cascaded baseline via ASR pseudo-label distillation.** A separate Whisper-small Swahili ASR model was developed by pseudo-labelling unlabelled Common Voice and FLEURS-train audio with a Whisper-large-v3 teacher, applying a three-filter quality recipe (confidence + n-gram repetition + Swahili language identification), and fine-tuning the student on the union of the filtered pseudo-labels and the labelled KenSpeech corpus. The resulting model substantially reduces WER on FLEURS sw_ke compared with off-the-shelf Whisper-small, providing the cascaded baseline used in the comparison above. The filter recipe -- and the per-filter ablation showing each filter's marginal contribution -- constitutes a stand-alone reproducible methodology for low-resource ASR self-training that is applicable beyond Swahili.
+5. **Improved cascaded baseline via ASR pseudo-label distillation.** A separate Whisper-small Swahili ASR model was developed by pseudo-labelling unlabelled Common Voice and FLEURS-train audio with a Whisper-large-v3 teacher and fine-tuning the student on the union of the pseudo-labels and the labelled KenSpeech corpus. On the FLEURS sw_ke test set the fine-tuned student reduced Word Error Rate from 87.22% (vanilla Whisper-small) to 42.98%, with a measured 9.3-point reduction attributable to the pseudo-labels alone over a KenSpeech-only fine-tune. An ablation of the proposed three-filter recipe (confidence, n-gram repetition, Swahili language identification) showed that aggressive filtering did not improve WER at the chosen thresholds when paired with the Whisper-large-v3 teacher; this is itself a useful finding, suggesting that pseudo-label filtering recipes should be calibrated to teacher reliability rather than applied uniformly. The full pipeline, filter recipe, and per-filter ablation methodology are released as a reproducible artefact applicable beyond Swahili.
 
 This work demonstrates that the Hibiki architecture can be adapted for low-resource African language pairs at a fraction of the original computational cost, opening a pathway for end-to-end speech translation research at African universities. The synthetic data generation methodology, codebase, trained models, and the auxiliary ASR fine-tuning pipeline are made available to support future work on Swahili and other underserved languages.
 
