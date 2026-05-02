@@ -169,19 +169,26 @@ def _teacher_transcribe(
     )
 
     seq = out.sequences[0]
-    # generate() includes the decoder prompt at the front; output_scores covers only newly-generated tokens
-    new_tokens = seq[-len(out.scores):]
-
-    log_prob_sum = 0.0
-    n_counted = 0
-    eos_id = processor.tokenizer.eos_token_id
-    for tok_id, score in zip(new_tokens.tolist(), out.scores):
-        log_probs = torch.log_softmax(score[0], dim=-1)
-        log_prob_sum += log_probs[tok_id].item()
-        n_counted += 1
-        if tok_id == eos_id:
-            break
-    avg_log_prob = log_prob_sum / max(1, n_counted)
+    scores = getattr(out, "scores", None) or ()
+    if scores:
+        # generate() includes the decoder prompt at the front; output_scores covers only newly-generated tokens
+        new_tokens = seq[-len(scores):]
+        log_prob_sum = 0.0
+        n_counted = 0
+        eos_id = processor.tokenizer.eos_token_id
+        for tok_id, score in zip(new_tokens.tolist(), scores):
+            log_probs = torch.log_softmax(score[0], dim=-1)
+            log_prob_sum += log_probs[tok_id].item()
+            n_counted += 1
+            if tok_id == eos_id:
+                break
+        avg_log_prob = log_prob_sum / max(1, n_counted)
+    else:
+        # output_scores was silently ignored by the transformers version we're on.
+        # Fall back to whole-sequence decode without a confidence signal; the
+        # confidence filter will be a no-op for these entries.
+        new_tokens = seq
+        avg_log_prob = 0.0
 
     text = processor.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
     return text, avg_log_prob
@@ -229,6 +236,7 @@ def main():
     audio_root.mkdir(exist_ok=True)
     jsonl_path = out_dir / "pseudo_labels.jsonl"
 
+    print("[pseudo_label.py rev=fix-bf16-and-scores]")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}[args.precision]
     print(f"Loading teacher {args.teacher_model} on {device} ({args.precision})...")
