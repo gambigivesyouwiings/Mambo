@@ -51,7 +51,13 @@ def build_compute_metrics(processor):
         label_ids = np.where(label_ids != -100, label_ids, pad_token_id)
         pred_str = processor.tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = processor.tokenizer.batch_decode(label_ids, skip_special_tokens=True)
-        wer = 100.0 * wer_metric.compute(predictions=pred_str, references=label_str)
+        # WER metric crashes on empty references; filter to non-empty pairs and
+        # substitute a single space for empty predictions (counts as full-deletion).
+        pairs = [(p if p.strip() else " ", r) for p, r in zip(pred_str, label_str) if r.strip()]
+        if not pairs:
+            return {"wer": 100.0}
+        preds, refs = zip(*pairs)
+        wer = 100.0 * wer_metric.compute(predictions=list(preds), references=list(refs))
         return {"wer": wer}
 
     return compute_metrics
@@ -82,6 +88,7 @@ def main():
 
     torch.manual_seed(args.seed)
 
+    print("[train.py rev=strip-bos-and-empty-skip]")
     print(f"Loading processor and model: {args.base_model}")
     processor = WhisperProcessor.from_pretrained(args.base_model, language="sw", task="transcribe")
     model = WhisperForConditionalGeneration.from_pretrained(args.base_model)

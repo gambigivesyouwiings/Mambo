@@ -62,10 +62,20 @@ class SwASRDataset(Dataset):
         self.kenspeech = KenSpeechLoader(load_audio=True, local_dir=kenspeech_dir)
         print(f"  KenSpeech: {len(self.kenspeech)} samples")
 
-        # Build a flat list of (kind, payload) tuples so __getitem__ can dispatch
+        # Build a flat list of (kind, payload) tuples so __getitem__ can dispatch.
+        # Skip KenSpeech entries whose transcription is empty — they would produce
+        # degenerate labels (just special tokens) and hurt training.
         self.entries: List[Dict] = []
+        n_skipped_empty = 0
         for sample_idx in range(len(self.kenspeech)):
+            sample = self.kenspeech[sample_idx]
+            text = (sample.get("transcription") or sample.get("text") or "").strip()
+            if not text:
+                n_skipped_empty += 1
+                continue
             self.entries.append({"kind": "kenspeech", "sample_idx": sample_idx})
+        if n_skipped_empty:
+            print(f"  Skipped {n_skipped_empty} KenSpeech samples with empty transcription")
 
         # ---- Optional pseudo-labeled audio ----
         if pseudo_labels_path:
@@ -141,17 +151,31 @@ class WhisperASRCollator:
 
     input_features are fixed-shape (Whisper feature extractor pads/truncates to T_in=3000)
     so we can stack directly.
+
+    Also strips the leading <|startoftranscript|> from each label sequence: HF's Trainer
+    internally calls shift_tokens_right(labels) which prepends decoder_start_token_id (=SOT
+    for Whisper). If we leave SOT in labels, decoder_input_ids ends up with two leading SOTs,
+    which is the wrong prompt and contributes to the loss-collapse failure mode.
     """
 
     pad_token_id: int = 50257  # Whisper's pad
+    bos_token_id: int = 50258  # Whisper's <|startoftranscript|>
 
     def __call__(self, batch: List[Dict]) -> Dict[str, torch.Tensor]:
         input_features = torch.stack([b["input_features"] for b in batch], dim=0)
 
-        max_len = max(b["labels"].size(0) for b in batch)
+        # Strip leading BOS (SOT) from labels if present
+        stripped = []
+        for b in batch:
+            lab = b["labels"]
+            if lab.numel() > 0 and lab[0].item() == self.bos_token_id:
+                lab = lab[1:]
+            stripped.append(lab)
+
+        max_len = max(l.size(0) for l in stripped)
         labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
-        for i, b in enumerate(batch):
-            L = b["labels"].size(0)
-            labels[i, :L] = b["labels"]
+        for i, l in enumerate(stripped):
+            L = l.size(0)
+            labels[i, :L] = l
 
         return {"input_features": input_features, "labels": labels}
