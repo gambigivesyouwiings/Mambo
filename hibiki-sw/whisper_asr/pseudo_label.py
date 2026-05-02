@@ -155,7 +155,7 @@ def _teacher_transcribe(
     """Returns (text, length-normalized avg log-prob) for one audio."""
     feats = processor.feature_extractor(
         audio_16k, sampling_rate=16000, return_tensors="pt"
-    ).input_features.to(device)
+    ).input_features.to(device=device, dtype=next(model.parameters()).dtype)
 
     out = model.generate(
         input_features=feats,
@@ -234,7 +234,7 @@ def main():
     print(f"Loading teacher {args.teacher_model} on {device} ({args.precision})...")
     processor = WhisperProcessor.from_pretrained(args.teacher_model)
     model = WhisperForConditionalGeneration.from_pretrained(
-        args.teacher_model, torch_dtype=dtype
+        args.teacher_model, dtype=dtype
     ).to(device)
     model.eval()
 

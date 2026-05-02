@@ -98,7 +98,7 @@ def _passes_lang_id(entry: Dict, sw_confidence_threshold: float) -> bool:
 
 # ---- Combine filters and compute ablation stats -------------------------------
 
-FILTERS = ["confidence", "repetition", "lang_id"]
+FILTERS = sorted(["confidence", "repetition", "lang_id"])
 
 
 def _evaluate_entry(
