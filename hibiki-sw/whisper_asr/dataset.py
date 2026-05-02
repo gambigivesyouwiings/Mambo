@@ -69,7 +69,7 @@ class SwASRDataset(Dataset):
         n_skipped_empty = 0
         for sample_idx in range(len(self.kenspeech)):
             sample = self.kenspeech[sample_idx]
-            text = (sample.get("transcription") or sample.get("text") or "").strip()
+            text = (sample.get("sentence") or sample.get("transcription") or sample.get("text") or "").strip()
             if not text:
                 n_skipped_empty += 1
                 continue
@@ -80,6 +80,7 @@ class SwASRDataset(Dataset):
         # ---- Optional pseudo-labeled audio ----
         if pseudo_labels_path:
             n_added = 0
+            n_bad_audio = 0
             with open(pseudo_labels_path, "r", encoding="utf-8") as f:
                 for line in f:
                     try:
@@ -87,15 +88,27 @@ class SwASRDataset(Dataset):
                     except Exception:
                         continue
                     text = (e.get("pseudo_label") or "").strip()
-                    if not text or not e.get("audio_path"):
+                    audio_path = e.get("audio_path")
+                    if not text or not audio_path:
+                        continue
+                    # Validate audio file is readable — soundfile/libsndfile can segfault
+                    # in DataLoader workers on corrupt WAVs, killing training.
+                    try:
+                        info = sf.info(audio_path)
+                        if info.frames <= 0:
+                            raise RuntimeError("zero-length audio")
+                    except Exception:
+                        n_bad_audio += 1
                         continue
                     self.entries.append({
                         "kind": "pseudo",
-                        "audio_path": e["audio_path"],
+                        "audio_path": audio_path,
                         "text": text,
                     })
                     n_added += 1
             print(f"  Pseudo-labels: +{n_added} samples from {pseudo_labels_path}")
+            if n_bad_audio:
+                print(f"  Pseudo-labels: dropped {n_bad_audio} entries with unreadable audio")
 
         print(f"  Total: {len(self.entries)} training samples")
 
@@ -106,7 +119,7 @@ class SwASRDataset(Dataset):
         if entry["kind"] == "kenspeech":
             sample = self.kenspeech[entry["sample_idx"]]
             audio = np.asarray(sample["audio"]["array"], dtype=np.float32)
-            text = (sample.get("transcription") or sample.get("text") or "").strip()
+            text = (sample.get("sentence") or sample.get("transcription") or sample.get("text") or "").strip()
         else:
             audio, sr = sf.read(entry["audio_path"])
             if sr != 16000:
