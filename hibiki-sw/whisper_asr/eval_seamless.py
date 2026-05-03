@@ -63,7 +63,7 @@ def s2t_translate(
     audio_array = audio_array.astype(np.float32, copy=False)
 
     inputs = processor(
-        audios=audio_array,
+        audio=audio_array,
         sampling_rate=sampling_rate,
         return_tensors="pt",
     ).to(device)
@@ -74,12 +74,16 @@ def s2t_translate(
         generate_speech=False,
         num_beams=4,
     )
-    # generate(generate_speech=False) returns a tuple whose first element is text token IDs
-    if isinstance(out, tuple):
+    # generate(generate_speech=False) may return a tuple, ModelOutput, or plain tensor.
+    # Extract the token-ids tensor robustly.
+    if hasattr(out, "sequences"):
+        token_ids = out.sequences
+    elif isinstance(out, tuple):
         token_ids = out[0]
     else:
         token_ids = out
-    text = processor.decode(token_ids[0].tolist(), skip_special_tokens=True)
+    # batch_decode handles tensors (and lists of lists) cleanly across transformers versions.
+    text = processor.batch_decode(token_ids, skip_special_tokens=True)[0]
     return text.strip()
 
 
