@@ -195,7 +195,8 @@ def main():
 
     logger = TrainingLogger(
         log_dir=os.path.join(args.output_dir, "logs"),
-        enabled=(local_rank == 0),
+        rank=local_rank,
+        log_interval=config["training"]["common"].get("log_every_steps", 100),
     )
 
     # Training loop
@@ -204,11 +205,15 @@ def main():
     step = start_step
     grad_accum = train_cfg["gradient_accumulation"]
     accum_loss = 0.0
+    accum_tokens = 0
 
     while step < train_cfg["max_steps"]:
         sampler.set_epoch(step)
         for batch in loader:
             audio_tokens = batch["audio_tokens"].to(device)
+            if local_rank == 0 and (step % grad_accum == 0):
+                logger.start_step()
+            accum_tokens += audio_tokens.numel()
 
             with autocast(dtype=torch.float16):
                 _, loss = model(audio_tokens)
@@ -226,11 +231,14 @@ def main():
                 scheduler.step()
 
                 if local_rank == 0:
-                    logger.log_step(step, {
-                        "loss": accum_loss,
-                        "lr": scheduler.get_last_lr()[0],
-                    })
+                    logger.log_step(
+                        step,
+                        {"loss": accum_loss},
+                        lr=scheduler.get_last_lr()[0],
+                        tokens_processed=accum_tokens,
+                    )
                 accum_loss = 0.0
+                accum_tokens = 0
 
             step += 1
 

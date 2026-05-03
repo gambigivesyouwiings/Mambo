@@ -155,7 +155,8 @@ def main():
     # Logger
     logger = TrainingLogger(
         log_dir=os.path.join(args.output_dir, "logs"),
-        enabled=(local_rank == 0),
+        rank=local_rank,
+        log_interval=config["training"]["common"].get("log_every_steps", 100),
     )
 
     # Training loop
@@ -167,14 +168,18 @@ def main():
     while step < train_cfg["max_steps"]:
         sampler.set_epoch(step)
         for batch in loader:
+            logger.start_step()
             loss = train_step(model, batch, scaler, optimizer, scheduler, device)
 
             step += 1
             if local_rank == 0:
-                logger.log_step(step, {
-                    "loss": loss,
-                    "lr": scheduler.get_last_lr()[0],
-                })
+                tokens_processed = batch["input_ids"].numel()
+                logger.log_step(
+                    step,
+                    {"loss": loss},
+                    lr=scheduler.get_last_lr()[0],
+                    tokens_processed=tokens_processed,
+                )
 
             if step % config["training"]["common"]["save_every_steps"] == 0:
                 if local_rank == 0:
