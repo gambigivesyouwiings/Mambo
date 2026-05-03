@@ -53,7 +53,7 @@ def free_gpu(label: str = ""):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         used = torch.cuda.memory_allocated() / 1e9
-        total = torch.cuda.get_device_properties(0).total_mem / 1e9
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
         print(f"  GPU{(' ' + label) if label else ''}: {used:.1f}/{total:.1f} GB")
 
 
