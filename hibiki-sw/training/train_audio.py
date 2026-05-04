@@ -131,8 +131,11 @@ def main():
         print(f"Loading Stage 1 checkpoint from {args.stage1_ckpt}")
     ckpt = torch.load(args.stage1_ckpt, map_location="cpu")
     # Extract temporal transformer state dict (strip DDP prefix if present)
+    raw_state = ckpt.get("model_state_dict", ckpt.get("model", {}))
+    if not raw_state:
+        raise KeyError(f"Checkpoint missing model weights: keys={list(ckpt.keys())}")
     state_dict = {}
-    for k, v in ckpt["model_state_dict"].items():
+    for k, v in raw_state.items():
         k = k.replace("module.", "")
         if not k.startswith("depth."):
             state_dict[k] = v
