@@ -165,8 +165,7 @@ def main():
     # Dataset
     dataset = AudioPretrainDataset(
         data_dir=args.data_dir,
-        num_codebooks=model_cfg["codec"]["num_codebooks"],
-        max_len=model_cfg["temporal"]["max_seq_len"],
+        max_frames=model_cfg["temporal"]["max_seq_len"],
     )
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=local_rank, shuffle=True)
     loader = DataLoader(

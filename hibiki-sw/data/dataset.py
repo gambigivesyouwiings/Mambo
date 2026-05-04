@@ -143,12 +143,7 @@ class AudioPretrainDataset(Dataset):
 
     Each sample is a pre-encoded Mimi token array of shape (Q, T) stored as
     a .npy file (int16). At load time we randomly crop to a fixed number of
-    frames, flatten the codebooks into a single stream, and return
-    (input_ids, labels) for next-token prediction.
-
-    The single-stream interleaving order follows Mimi convention:
-        t=0: q0 q1 ... q7, t=1: q0 q1 ... q7, ...
-    giving a 1-D sequence of length Q * T_crop.
+    frames and return the raw (Q, T) tokens for next-token prediction.
 
     Args:
         data_dir: directory containing .npy token files.
@@ -175,22 +170,7 @@ class AudioPretrainDataset(Dataset):
             tokens = tokens[:, start : start + self.max_frames]
         else:
             tokens = _pad_or_truncate_2d(tokens, self.max_frames)
-
-        # Flatten to single stream: interleave codebooks per timestep
-        # Result shape: (Q * max_frames,)
-        flat = tokens.T.reshape(-1)  # (T, Q) -> (T*Q,)
-
-        # Prepend BOS, append EOS
-        seq_len = len(flat)
-        seq = np.full(seq_len + 2, PAD_ID, dtype=np.int64)
-        seq[0] = BOS_ID
-        seq[1 : seq_len + 1] = flat
-        seq[seq_len + 1] = EOS_ID
-
-        input_ids = torch.from_numpy(seq[:-1].copy())
-        labels = torch.from_numpy(seq[1:].copy())
-
-        return {"input_ids": input_ids, "labels": labels}
+        return {"audio_tokens": torch.from_numpy(tokens.copy())}
 
 
 # ---------------------------------------------------------------------------
