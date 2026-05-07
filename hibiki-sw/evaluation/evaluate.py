@@ -26,14 +26,15 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torchaudio
+import soundfile as sf
+from scipy.signal import resample_poly
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from model.hibiki_model import HibikiModel
 from model.codec import MimiCodec
-from inference.translate import load_model, load_audio, translate, decode_text
+from inference.translate import load_model, translate, decode_text
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,32 @@ class ASRBLEUScorer:
             )
             return result["text"].strip()
 
+    def transcribe_array(self, audio: np.ndarray, sr: int, language: str = "sw") -> str:
+        """Transcribe audio from a numpy/torch array to text."""
+        self._load_whisper()
+
+        if isinstance(audio, torch.Tensor):
+            audio = audio.detach().cpu().numpy()
+
+        if audio.ndim == 2:
+            audio = audio.squeeze(0)
+
+        audio = _to_mono(audio).astype(np.float32)
+        if sr != 16000:
+            audio = _resample_audio(audio, sr, 16000)
+
+        try:
+            from faster_whisper import WhisperModel
+            segments, _ = self._model.transcribe(
+                audio, language=language, beam_size=5
+            )
+            return " ".join(seg.text.strip() for seg in segments)
+        except Exception:
+            result = self._model.transcribe(
+                audio, language=language, beam_size=5
+            )
+            return result["text"].strip()
+
     def compute_bleu(self, hypotheses: List[str], references: List[str]) -> Dict:
         """Compute BLEU score."""
         import sacrebleu
@@ -88,6 +115,28 @@ class ASRBLEUScorer:
             "bleu_bp": bleu.bp,
             "bleu_precisions": bleu.precisions,
         }
+
+
+def _resample_audio(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    if orig_sr == target_sr:
+        return audio
+    from math import gcd
+    g = gcd(orig_sr, target_sr)
+    return resample_poly(audio, target_sr // g, orig_sr // g).astype(np.float32)
+
+
+def _to_mono(audio: np.ndarray) -> np.ndarray:
+    if audio.ndim == 1:
+        return audio
+    return audio.mean(axis=1)
+
+
+def _save_audio(path: str, audio: torch.Tensor, sr: int) -> None:
+    if isinstance(audio, torch.Tensor):
+        audio = audio.detach().cpu().numpy()
+    if audio.ndim == 2:
+        audio = audio.squeeze(0)
+    sf.write(path, audio, sr)
 
 
 # ---------------------------------------------------------------------------
@@ -117,17 +166,13 @@ class SpeakerSimilarityScorer:
         """Extract speaker embedding from audio file."""
         self._load_model()
 
-        waveform, sr = torchaudio.load(audio_path)
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-
-        # Resample to 16kHz (WavLM expects 16kHz)
+        waveform, sr = sf.read(audio_path, dtype="float32", always_2d=True)
+        waveform = _to_mono(waveform)
         if sr != 16000:
-            resampler = torchaudio.transforms.Resample(sr, 16000)
-            waveform = resampler(waveform)
+            waveform = _resample_audio(waveform, sr, 16000)
 
         inputs = self._feature_extractor(
-            waveform.squeeze().numpy(),
+            waveform,
             sampling_rate=16000,
             return_tensors="pt",
         )
@@ -198,14 +243,11 @@ def evaluate_on_fleurs(
 
         try:
             # Load source audio
-            src_audio = torch.tensor(
-                src_sample["audio"]["array"], dtype=torch.float32
-            ).unsqueeze(0)
+            src_audio_np = np.array(src_sample["audio"]["array"], dtype=np.float32)
             src_sr = src_sample["audio"]["sampling_rate"]
-
             if src_sr != 24000:
-                resampler = torchaudio.transforms.Resample(src_sr, 24000)
-                src_audio = resampler(src_audio)
+                src_audio_np = _resample_audio(src_audio_np, src_sr, 24000)
+            src_audio = torch.from_numpy(src_audio_np).unsqueeze(0)
 
             # Translate
             result = translate(
@@ -221,10 +263,12 @@ def evaluate_on_fleurs(
 
             # Save generated audio
             gen_audio_path = os.path.join(output_dir, "audio", f"gen_{uid}.wav")
-            torchaudio.save(gen_audio_path, result["translated_audio"], 24000)
+            _save_audio(gen_audio_path, result["translated_audio"], 24000)
 
-            # ASR-BLEU: transcribe generated audio
-            hypothesis = asr_scorer.transcribe(gen_audio_path, language=tgt_whisper_lang)
+            # ASR-BLEU: transcribe generated audio (avoid torchcodec by using arrays)
+            hypothesis = asr_scorer.transcribe_array(
+                result["translated_audio"], sr=24000, language=tgt_whisper_lang
+            )
             reference = tgt_sample["transcription"]
             hypotheses.append(hypothesis)
             references.append(reference)
