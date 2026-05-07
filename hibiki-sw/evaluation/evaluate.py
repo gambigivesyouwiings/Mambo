@@ -48,6 +48,7 @@ class ASRBLEUScorer:
         self.device = device
         self.whisper_model_name = whisper_model
         self._model = None
+        self._backend = None
 
     def _load_whisper(self):
         if self._model is not None:
@@ -59,25 +60,25 @@ class ASRBLEUScorer:
                 device=self.device,
                 compute_type="float16" if self.device == "cuda" else "int8",
             )
+            self._backend = "faster_whisper"
         except ImportError:
             import whisper
             self._model = whisper.load_model(self.whisper_model_name, device=self.device)
+            self._backend = "whisper"
 
     def transcribe(self, audio_path: str, language: str = "sw") -> str:
         """Transcribe audio file to text."""
         self._load_whisper()
-
-        try:
-            from faster_whisper import WhisperModel
+        if self._backend == "faster_whisper":
             segments, _ = self._model.transcribe(
                 audio_path, language=language, beam_size=5
             )
             return " ".join(seg.text.strip() for seg in segments)
-        except Exception:
-            result = self._model.transcribe(
-                audio_path, language=language, beam_size=5
-            )
-            return result["text"].strip()
+
+        result = self._model.transcribe(
+            audio_path, language=language, beam_size=5
+        )
+        return result["text"].strip()
 
     def transcribe_array(self, audio: np.ndarray, sr: int, language: str = "sw") -> str:
         """Transcribe audio from a numpy/torch array to text."""
@@ -93,17 +94,16 @@ class ASRBLEUScorer:
         if sr != 16000:
             audio = _resample_audio(audio, sr, 16000)
 
-        try:
-            from faster_whisper import WhisperModel
+        if self._backend == "faster_whisper":
             segments, _ = self._model.transcribe(
                 audio, language=language, beam_size=5
             )
             return " ".join(seg.text.strip() for seg in segments)
-        except Exception:
-            result = self._model.transcribe(
-                audio, language=language, beam_size=5
-            )
-            return result["text"].strip()
+
+        result = self._model.transcribe(
+            audio, language=language, beam_size=5
+        )
+        return result["text"].strip()
 
     def compute_bleu(self, hypotheses: List[str], references: List[str]) -> Dict:
         """Compute BLEU score."""
