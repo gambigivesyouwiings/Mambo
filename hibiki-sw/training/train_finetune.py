@@ -166,7 +166,8 @@ def main():
 
     enable_gradient_checkpointing(model)
     model = model.to(device)
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    if world_size > 1:
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     if local_rank == 0:
         print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
