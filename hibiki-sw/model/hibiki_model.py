@@ -323,11 +323,17 @@ class HibikiModel(nn.Module):
 
             # Sample text token
             text_logits_t = text_logits[:, 0, :] / text_temperature
-            if top_k_text > 0:
-                topk_vals, _ = text_logits_t.topk(top_k_text, dim=-1)
+            text_logits_t = torch.nan_to_num(text_logits_t, neginf=-1e9, posinf=1e9)
+            vocab = text_logits_t.shape[-1]
+            k_text = min(top_k_text, vocab) if top_k_text > 0 else 0
+            if k_text > 0:
+                topk_vals, _ = text_logits_t.topk(k_text, dim=-1)
                 text_logits_t[text_logits_t < topk_vals[:, -1:]] = float("-inf")
             text_probs = F.softmax(text_logits_t, dim=-1)
+            if (not torch.isfinite(text_probs).all()) or (text_probs.sum(dim=-1) == 0).any():
+                text_probs = torch.full_like(text_probs, 1.0 / vocab)
             text_tok = torch.multinomial(text_probs, 1).squeeze(-1)
+            text_tok = text_tok.clamp(min=0, max=vocab - 1)
             all_text_tokens.append(text_tok)
 
             # Depth transformer: generate audio tokens
@@ -361,11 +367,17 @@ class HibikiModel(nn.Module):
             z, text_logits, kv_caches = self.temporal(h, offset=t_extra, kv_caches=kv_caches)
 
             text_logits_t = text_logits[:, 0, :] / text_temperature
-            if top_k_text > 0:
-                topk_vals, _ = text_logits_t.topk(top_k_text, dim=-1)
+            text_logits_t = torch.nan_to_num(text_logits_t, neginf=-1e9, posinf=1e9)
+            vocab = text_logits_t.shape[-1]
+            k_text = min(top_k_text, vocab) if top_k_text > 0 else 0
+            if k_text > 0:
+                topk_vals, _ = text_logits_t.topk(k_text, dim=-1)
                 text_logits_t[text_logits_t < topk_vals[:, -1:]] = float("-inf")
             text_probs = F.softmax(text_logits_t, dim=-1)
+            if (not torch.isfinite(text_probs).all()) or (text_probs.sum(dim=-1) == 0).any():
+                text_probs = torch.full_like(text_probs, 1.0 / vocab)
             text_tok = torch.multinomial(text_probs, 1).squeeze(-1)
+            text_tok = text_tok.clamp(min=0, max=vocab - 1)
             all_text_tokens.append(text_tok)
 
             text_embed_t = self.temporal.text_embed(text_tok.unsqueeze(1))

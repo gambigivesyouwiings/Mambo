@@ -274,11 +274,17 @@ class DepthTransformer(nn.Module):
 
             # Temperature + top-k sampling
             logits = logits / temperature
-            if top_k > 0:
-                topk_vals, _ = logits.topk(top_k, dim=-1)
+            logits = torch.nan_to_num(logits, neginf=-1e9, posinf=1e9)
+            vocab = logits.shape[-1]
+            k_audio = min(top_k, vocab) if top_k > 0 else 0
+            if k_audio > 0:
+                topk_vals, _ = logits.topk(k_audio, dim=-1)
                 logits[logits < topk_vals[:, -1:]] = float("-inf")
             probs = F.softmax(logits, dim=-1)
+            if (not torch.isfinite(probs).all()) or (probs.sum(dim=-1) == 0).any():
+                probs = torch.full_like(probs, 1.0 / vocab)
             tok = torch.multinomial(probs, 1).squeeze(-1)  # (B,)
+            tok = tok.clamp(min=0, max=vocab - 1)
             tokens.append(tok)
 
         return torch.stack(tokens, dim=1)  # (B, Q)
