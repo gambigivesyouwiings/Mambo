@@ -150,19 +150,32 @@ def translate(
 
 
 def decode_text(text_ids: torch.Tensor, tokenizer_path: str) -> str:
-    """Decode text token IDs back to string."""
+    """Decode text token IDs back to string (stops at EOS)."""
     import sentencepiece as spm
 
     sp = spm.SentencePieceProcessor()
     sp.load(tokenizer_path)
 
-    # Filter out special tokens (pad=0, bos=1, eos=2, epad=3)
+    eos_id = 2
+    special_ids = {0, 1, 2, 3}
+
     ids = text_ids.tolist()
-    filtered = [tid for tid in ids if tid >= 4]
+    cleaned = []
+    for tid in ids:
+        if tid == eos_id:
+            break
+        if tid in special_ids:
+            continue
+        cleaned.append(tid)
 
-    # Offset by -4 since model adds +4 for special tokens
-    adjusted = [tid - 4 for tid in filtered if (tid - 4) >= 0 and (tid - 4) < sp.get_piece_size()]
+    if not cleaned:
+        return ""
 
+    vocab_size = sp.get_piece_size()
+    if max(cleaned) >= vocab_size:
+        cleaned = [tid - 4 for tid in cleaned]
+
+    adjusted = [tid for tid in cleaned if 0 <= tid < vocab_size]
     return sp.decode(adjusted)
 
 
